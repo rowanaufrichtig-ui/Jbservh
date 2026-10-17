@@ -625,7 +625,9 @@ function renderSources() {
 }
 
 async function setupRefresh() {
-  // Only the local server (npm start) has an API; GitHub Pages does not.
+  // Only the local server (npm start) has an API; GitHub Pages does not,
+  // and the Android app refreshes on the phone instead.
+  if (NATIVE) return;
   try {
     const res = await fetch('api/status', { cache: 'no-store' });
     if (!res.ok) return;
@@ -675,13 +677,79 @@ function route() {
 }
 
 // ---------- boot ----------
-async function loadJobs() {
-  const data = await (await fetch('data/jobs.json', { cache: 'no-cache' })).json();
+// Inside the Android app the page can check the job boards itself.
+const NATIVE = Boolean(window.Capacitor?.isNativePlatform?.());
+const CACHE_KEY = 'sq1-jobs';
+const AUTO_REFRESH_HOURS = 6;
+
+function applyJobs(data) {
   state.jobs = data.jobs;
   state.sources = data.sources;
   state.generated = data.generated;
   state.jobsByUrn = new Map();
   for (const j of state.jobs) if (j.urn) state.jobsByUrn.set(j.urn, [...(state.jobsByUrn.get(j.urn) ?? []), j]);
+}
+
+async function loadJobs() {
+  const bundled = await (await fetch('data/jobs.json', { cache: 'no-cache' })).json();
+  const cached = NATIVE ? store.get(CACHE_KEY, null) : null;
+  applyJobs(cached?.jobs && cached.generated > bundled.generated ? cached : bundled);
+}
+
+function setSync(text, busy = false) {
+  $('#sync-text').textContent = text;
+  $('#refresh-status').textContent = busy ? text : '';
+  for (const id of ['#sync-button', '#refresh-button']) $(id).disabled = busy;
+  $('#sync').classList.toggle('busy', busy);
+}
+
+const jobKey = (j) => j.sources[0]?.url;
+let refreshing = null;
+
+function refreshOnDevice() {
+  if (refreshing) return refreshing;
+  refreshing = (async () => {
+    setSync('Checking the job boards…', true);
+    try {
+      const [{ buildJobsData }, establishments] = await Promise.all([
+        import('./engine/lib/pipeline.js'),
+        fetch('data/london-establishments.json').then((r) => r.json()),
+      ]);
+      const data = await buildJobsData({
+        schools: state.schools,
+        establishments,
+        previous: { jobs: state.jobs },
+        onProgress: ({ step, total, source }) => setSync(`Checking ${source} (${step} of ${total})…`, true),
+      });
+      if (!data.sources.some((s) => s.ok)) throw new Error('none of the job boards answered');
+      const before = new Set(state.jobs.map(jobKey));
+      const fresh = data.jobs.filter((j) => !before.has(jobKey(j))).length;
+      store.set(CACHE_KEY, data);
+      applyJobs(data);
+      renderAll();
+      setSync(`Updated ${stampFmt.format(new Date(data.generated))}${fresh ? ` · ${fresh} new job${fresh === 1 ? '' : 's'}` : ''}`);
+    } catch (e) {
+      console.error(e);
+      setSync(`Could not check the job boards (${e.message}). Showing jobs from ${stampFmt.format(new Date(state.generated))}.`);
+    } finally {
+      refreshing = null;
+    }
+  })();
+  return refreshing;
+}
+
+function setupSync() {
+  setSync(`Jobs checked ${stampFmt.format(new Date(state.generated))}`);
+  if (!NATIVE) return;
+  document.documentElement.classList.add('native');
+  $('#sync-button').hidden = false;
+  $('#sync-button').addEventListener('click', refreshOnDevice);
+  $('#refresh-row').hidden = false;
+  $('#refresh-button').addEventListener('click', refreshOnDevice);
+  // Check automatically when the jobs are more than a few hours old, unless
+  // the phone is offline or in data saver mode.
+  const ageHours = (Date.now() - new Date(state.generated)) / 36e5;
+  if (ageHours > AUTO_REFRESH_HOURS && navigator.onLine !== false && !navigator.connection?.saveData) refreshOnDevice();
 }
 
 function renderAll() {
@@ -713,6 +781,7 @@ async function boot() {
   renderAll();
   window.addEventListener('hashchange', route);
   route();
+  setupSync();
   setupRefresh();
 }
 

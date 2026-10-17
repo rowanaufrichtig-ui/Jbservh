@@ -1,5 +1,9 @@
-// Small fetch wrapper: browser-like user agent, timeouts, retries and a
+// Small HTTP helper: browser-like user agent, timeouts, retries and a
 // polite per-host delay so we never hammer the job sites.
+//
+// In Node (and the GitHub Action) it uses fetch. Inside the Android app it
+// calls Capacitor's native HTTP plugin instead: the WebView's own fetch is
+// blocked by CORS on the job sites and silently drops headers like Referer.
 
 export const USER_AGENT =
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
@@ -17,18 +21,54 @@ async function waitForHost(url) {
   lastHit.set(host, Date.now());
 }
 
+const capacitor = globalThis.Capacitor?.isNativePlatform?.() ? globalThis.Capacitor : null;
+export const usingNativeHttp = Boolean(capacitor);
+
+// Give a native response the parts of the fetch Response API we use.
+function nativeResponse(r) {
+  const data = r.data;
+  const text = typeof data === 'string' ? data : JSON.stringify(data);
+  return {
+    status: r.status,
+    ok: r.status >= 200 && r.status < 300,
+    headers: r.headers ?? {},
+    text: async () => text,
+    json: async () => (typeof data === 'string' ? JSON.parse(data) : data),
+  };
+}
+
+function send(url, { method, headers, body, timeout }) {
+  if (capacitor) {
+    const isJson = /json/i.test(headers['Content-Type'] ?? '');
+    const data = body === undefined ? undefined : isJson && typeof body === 'string' ? JSON.parse(body) : String(body);
+    return capacitor
+      .nativePromise('CapacitorHttp', 'request', { url, method, headers, data, responseType: 'text', connectTimeout: timeout, readTimeout: timeout })
+      .then(nativeResponse);
+  }
+  return fetch(url, {
+    method,
+    body: body instanceof URLSearchParams ? body.toString() : body,
+    headers,
+    signal: AbortSignal.timeout(timeout),
+    redirect: 'follow',
+  });
+}
+
+function withTimeout(promise, ms, url) {
+  let timer;
+  const limit = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timed out after ${ms / 1000}s: ${url}`)), ms + 1000);
+  });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+
 export async function request(url, { method = 'GET', headers = {}, body, timeout = 45000, retries = 2 } = {}) {
   let lastErr;
+  const allHeaders = { 'User-Agent': USER_AGENT, 'Accept-Language': 'en-GB,en;q=0.9', ...headers };
   for (let attempt = 0; attempt <= retries; attempt++) {
     await waitForHost(url);
     try {
-      const res = await fetch(url, {
-        method,
-        body,
-        headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'en-GB,en;q=0.9', ...headers },
-        signal: AbortSignal.timeout(timeout),
-        redirect: 'follow',
-      });
+      const res = await withTimeout(send(url, { method, headers: allHeaders, body, timeout }), timeout, url);
       if (res.status >= 500 || res.status === 429) throw new Error(`HTTP ${res.status} for ${url}`);
       if (!res.ok) {
         const err = new Error(`HTTP ${res.status} for ${url}`);
@@ -55,6 +95,7 @@ export async function getJSON(url, opts) {
   return res.json();
 }
 
+// Node only (used by the school data build).
 export async function getBuffer(url, opts) {
   return Buffer.from(await (await request(url, opts)).arrayBuffer());
 }

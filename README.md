@@ -56,7 +56,8 @@ figure.
 
 ## Running it
 
-Needs Node.js 20 or later. There are no npm dependencies.
+Needs Node.js 20 or later. The website and the data scripts have no
+dependencies; `npm install` is only needed to build the Android app.
 
 ```bash
 npm start            # serves the site at http://localhost:8080
@@ -73,6 +74,53 @@ npm test             # unit tests for the parsers and classification rules
 
 When the site is served by `npm start`, the Sources tab also has a
 **Check the job boards now** button (limited to once every 10 minutes).
+
+## Android app
+
+The same site is packaged as an Android app with [Capacitor](https://capacitorjs.com).
+The app does one thing the website cannot: it **checks the job boards itself,
+from the phone**, so it stays current without any server or GitHub Pages
+setup.
+
+- It opens instantly with the jobs it last found (or the ones it shipped with).
+- When those are more than 6 hours old it checks Teaching Vacancies, TES,
+  MyNewTerm and Eteach in the background (skipped when offline or in data saver
+  mode). **Check now** on the Jobs tab does it on demand. Each check takes
+  about 30 seconds and uses roughly 15 MB of data, mostly TES job pages.
+- The map, school profiles and ECT guide work the same as on the website.
+  School results are bundled, so they only change with a new version of the app.
+
+### Installing
+
+1. Download `SquareOne.apk` on the phone: from the **android-latest** release on
+   GitHub once the workflow below has run on the default branch, or from the
+   `SquareOne-apk` artifact of any **Build Android app** run.
+2. Open it. Android will ask you to allow installs from your browser or files
+   app the first time.
+
+The APK is signed with a debug key. Builds from different machines have
+different keys, so to switch from one build to another you may need to
+uninstall the app first (your saved filters and cached jobs are cleared).
+
+### Building it yourself
+
+Needs JDK 21 and the Android SDK (platform 36, build tools 36), for example
+from Android Studio.
+
+```bash
+npm install
+npm run android:apk  # -> android/app/build/outputs/apk/debug/app-debug.apk
+npx cap open android # or open the project in Android Studio
+```
+
+`npm run android:sync` rebuilds `app-web/` (the website plus the job engine
+from `scripts/lib` and `scripts/sources`) and copies it into the Android
+project. `scripts/make-app-icons.py` redraws the launcher icon and splash
+screens.
+
+The **Build Android app** workflow (`.github/workflows/android.yml`) builds the
+APK on every push that touches the app, refreshes the bundled jobs first, and
+on the default branch republishes it as the `android-latest` release.
 
 ## Publishing on GitHub Pages
 
@@ -99,7 +147,12 @@ scripts/
   sources/              one module per job board
   lib/                  CSV/zip/xlsx readers, grid-to-lat/long, matching, rules
   data/london-establishments.json   every London school, for matching adverts
+  lib/pipeline.mjs      the shared job pipeline (Node and the Android app)
+  build-app-web.mjs     assembles app-web/ for the Android app
+  make-app-icons.py     draws the app icon and splash screens
 server.mjs              local static server with a refresh endpoint
+android/                Capacitor Android project
+capacitor.config.json   app id, name and web folder
 test/                   node:test unit tests
 ```
 

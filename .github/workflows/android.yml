@@ -1,0 +1,68 @@
+name: Build Android app
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "public/**"
+      - "scripts/**"
+      - "android/**"
+      - "capacitor.config.json"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/android.yml"
+
+permissions:
+  contents: write # to update the "android-latest" release
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - run: npm ci
+      - run: npm test
+
+      - name: Refresh the jobs bundled with the app
+        run: npm run jobs || echo "::warning::Could not refresh jobs; bundling the committed data"
+
+      - name: Copy the website and job engine into the Android project
+        run: npm run android:sync
+
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Name the APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk SquareOne.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SquareOne-apk
+          path: SquareOne.apk
+
+      # On the default branch, publish the APK as a release so it can be
+      # downloaded straight onto a phone.
+      - name: Update the android-latest release
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete android-latest --yes --cleanup-tag || true
+          gh release create android-latest SquareOne.apk \
+            --target "$GITHUB_SHA" \
+            --title "Square One for Android" \
+            --notes "Built from ${GITHUB_SHA::7}. Download SquareOne.apk on your phone and open it to install (allow installs from your browser when Android asks)."
