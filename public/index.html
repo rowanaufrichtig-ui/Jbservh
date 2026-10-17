@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Square One · London maths teaching jobs</title>
+  <meta name="description" content="Maths teaching jobs for early career teachers in London state schools and sixth forms, collected from Teaching Vacancies, TES, MyNewTerm and Eteach, with a map of every school's GCSE maths and A level results.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&family=STIX+Two+Text:ital,wght@0,500;0,600;1,500;1,600&display=swap">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    // Apply a saved light/dark choice before first paint.
+    try { const t = localStorage.getItem('sq1-theme'); if (t) document.documentElement.dataset.theme = t; } catch {}
+  </script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <div class="brand">
+        <p class="eyebrow">Maths · London · Early career teachers</p>
+        <h1 class="brand-name">Square One</h1>
+        <p class="brand-line">Maths teaching jobs in London’s state schools and sixth forms, gathered from the main job boards every day, with the results of every school on a map.</p>
+      </div>
+      <dl class="tally" id="tally" aria-live="polite">
+        <div><dt><i>n</i> =</dt><dd id="tally-jobs">–</dd><dd class="tally-label">open maths jobs</dd></div>
+        <div><dt>ECT</dt><dd id="tally-ect">–</dd><dd class="tally-label">marked suitable for ECTs</dd></div>
+        <div><dt>map</dt><dd id="tally-schools">–</dd><dd class="tally-label">state schools &amp; colleges</dd></div>
+      </dl>
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch between light and dark">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9Z"/></svg>
+      </button>
+    </div>
+    <nav class="tabs" aria-label="Sections">
+      <div class="tabs-inner" role="tablist">
+        <a href="#jobs" role="tab" id="tab-jobs" aria-controls="jobs">Jobs</a>
+        <a href="#map" role="tab" id="tab-map" aria-controls="map">Schools map</a>
+        <a href="#guide" role="tab" id="tab-guide" aria-controls="guide">ECT guide</a>
+        <a href="#sources" role="tab" id="tab-sources" aria-controls="sources">Sources</a>
+        <span class="updated" id="updated"></span>
+      </div>
+    </nav>
+  </header>
+
+  <main>
+    <!-- JOBS -->
+    <section id="jobs" class="panel" role="tabpanel" aria-labelledby="tab-jobs">
+      <div class="jobs-layout">
+        <aside class="filters" aria-label="Filter jobs">
+          <button type="button" class="filters-toggle" id="filters-toggle" aria-expanded="false" aria-controls="filters-body">Filters</button>
+          <form id="filters-body" class="filters-body" autocomplete="off">
+            <label class="field">
+              <span class="field-label">Search</span>
+              <input type="search" id="f-q" placeholder="School, borough, trust, keyword">
+            </label>
+
+            <fieldset class="field">
+              <legend class="field-label">Suitable for ECTs</legend>
+              <label class="radio"><input type="radio" name="f-ect" value="friendly" checked> Open to ECTs <span class="hint">marked suitable, or a classroom role</span></label>
+              <label class="radio"><input type="radio" name="f-ect" value="yes"> Only jobs marked ECT-suitable</label>
+              <label class="radio"><input type="radio" name="f-ect" value="all"> Show everything</label>
+            </fieldset>
+
+            <fieldset class="field">
+              <legend class="field-label">School type</legend>
+              <label class="check"><input type="checkbox" name="f-sector" value="state" checked> State schools &amp; academies</label>
+              <label class="check"><input type="checkbox" name="f-sector" value="independent"> Independent</label>
+              <label class="check"><input type="checkbox" name="f-sector" value="special"> Special &amp; alternative provision</label>
+              <label class="check"><input type="checkbox" name="f-sector" value="other"> Agencies &amp; unknown employers</label>
+            </fieldset>
+
+            <fieldset class="field">
+              <legend class="field-label">Sixth form</legend>
+              <label class="radio"><input type="radio" name="f-phase" value="any" checked> Any</label>
+              <label class="radio"><input type="radio" name="f-phase" value="sixthform"> School or college has a sixth form</label>
+              <label class="radio"><input type="radio" name="f-phase" value="ks5"> Advert mentions A level / KS5</label>
+            </fieldset>
+
+            <fieldset class="field">
+              <legend class="field-label">Role</legend>
+              <label class="check"><input type="checkbox" name="f-role" value="teacher" checked> Classroom teacher / lecturer</label>
+              <label class="check"><input type="checkbox" name="f-role" value="trainee" checked> Trainee &amp; salaried training</label>
+              <label class="check"><input type="checkbox" name="f-role" value="speculative" checked> Speculative applications</label>
+              <label class="check"><input type="checkbox" name="f-role" value="leadership"> Leadership &amp; TLR roles</label>
+              <label class="check"><input type="checkbox" name="f-role" value="support"> Tutors &amp; support roles</label>
+            </fieldset>
+
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Borough</span>
+                <select id="f-borough"><option value="">All of London</option></select>
+              </label>
+              <label class="field">
+                <span class="field-label">Pay area</span>
+                <select id="f-pay">
+                  <option value="">Any</option>
+                  <option value="Inner London">Inner London</option>
+                  <option value="Outer London">Outer London</option>
+                </select>
+              </label>
+            </div>
+
+            <label class="field">
+              <span class="field-label">Contract</span>
+              <select id="f-contract">
+                <option value="">Any</option>
+                <option value="Permanent">Permanent</option>
+                <option value="Fixed term">Fixed term</option>
+                <option value="Maternity cover">Maternity cover</option>
+              </select>
+            </label>
+
+            <button type="button" class="link-button" id="f-reset">Reset filters</button>
+          </form>
+        </aside>
+
+        <div class="results">
+          <div class="results-bar">
+            <p class="results-count" id="results-count">Loading jobs…</p>
+            <label class="sort">
+              <span>Sort by</span>
+              <select id="f-sort">
+                <option value="closing">Closing soonest</option>
+                <option value="newest">Newest first</option>
+                <option value="gcse">Best GCSE maths results</option>
+                <option value="alevel">Best A level results</option>
+              </select>
+            </label>
+          </div>
+          <ol class="job-list" id="job-list"></ol>
+          <div class="empty" id="jobs-empty" hidden>
+            <p><strong>No jobs match these filters.</strong> Try “Show everything” under Suitable for ECTs, or add more school types.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- MAP -->
+    <section id="map" class="panel" role="tabpanel" aria-labelledby="tab-map" hidden>
+      <div class="map-controls">
+        <label class="field compact">
+          <span class="field-label">Colour schools by</span>
+          <select id="m-metric">
+            <option value="maths4">GCSE maths, grade 4 or above</option>
+            <option value="maths5">GCSE maths, grade 5 or above</option>
+            <option value="alevel">A level average grade (UCAS points)</option>
+          </select>
+        </label>
+        <label class="field compact">
+          <span class="field-label">Show</span>
+          <select id="m-kind">
+            <option value="all">All secondary schools &amp; colleges</option>
+            <option value="sixthform">Only with a sixth form</option>
+            <option value="post16">Only 16–19 schools &amp; sixth form colleges</option>
+            <option value="vacancies">Only schools with a maths job open</option>
+          </select>
+        </label>
+        <label class="field compact">
+          <span class="field-label">Borough</span>
+          <select id="m-borough"><option value="">All of London</option></select>
+        </label>
+        <label class="field compact grow">
+          <span class="field-label">Find a school</span>
+          <input type="search" id="m-q" placeholder="Name, postcode or trust">
+        </label>
+      </div>
+
+      <div class="map-layout">
+        <div class="map-wrap">
+          <div id="leaflet" class="leaflet-host" aria-label="Map of London schools"></div>
+          <div class="legend" id="legend" aria-label="Map key"></div>
+        </div>
+        <aside class="school-panel" id="school-panel" aria-live="polite">
+          <div id="school-list-view">
+            <p class="panel-title" id="school-count"></p>
+            <ol class="school-list" id="school-list"></ol>
+          </div>
+          <article id="school-detail" class="school-detail" hidden></article>
+        </aside>
+      </div>
+    </section>
+
+    <!-- GUIDE -->
+    <section id="guide" class="panel prose-panel" role="tabpanel" aria-labelledby="tab-guide" hidden>
+      <div class="prose">
+        <h2>Starting out as a maths ECT in London</h2>
+        <p class="lede">Your first two years of teaching are your induction. Where you do them matters more than almost anything else on an advert, so this site leans towards schools that can support you and shows you their results before you apply.</p>
+
+        <h3>What every ECT is entitled to</h3>
+        <ul>
+          <li><strong>Two years of induction</strong> if you work full time, assessed against the Teachers’ Standards. Part-time ECTs take proportionally longer.</li>
+          <li><strong>A reduced timetable:</strong> 10% less teaching in year one and 5% less in year two, on top of your normal PPA time.</li>
+          <li><strong>An induction mentor and an induction tutor</strong>, and a funded training programme based on the Initial Teacher Training and Early Career Framework.</li>
+          <li><strong>Fixed-term and maternity-cover posts can count</strong> towards induction, as long as the post lasts at least a term.</li>
+        </ul>
+        <p class="note">State schools, academies, free schools and sixth form colleges can all offer statutory induction. An independent school can only do so through an appropriate body, so ask before you apply.</p>
+
+        <h3>Starting pay from September 2026</h3>
+        <div class="table-wrap">
+          <table class="pay-table">
+            <caption>Main pay range, point M1 (3.5% award)</caption>
+            <thead><tr><th scope="col">Pay area</th><th scope="col" class="num">M1 salary</th><th scope="col">Covers</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Inner London</th><td class="num">£41,729</td><td>Camden, City of London, Greenwich, Hackney, Hammersmith &amp; Fulham, Islington, Kensington &amp; Chelsea, Lambeth, Lewisham, Southwark, Tower Hamlets, Wandsworth, Westminster, plus Barking &amp; Dagenham, Brent, Ealing, Haringey, Merton, Newham and Waltham Forest</td></tr>
+              <tr><th scope="row">Outer London</th><td class="num">£39,196</td><td>Barnet, Bexley, Bromley, Croydon, Enfield, Harrow, Havering, Hillingdon, Hounslow, Kingston, Redbridge, Richmond, Sutton</td></tr>
+              <tr><th scope="row">Fringe</th><td class="num">£35,602</td><td>Some towns just outside London</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">Academies can set their own pay, and many add a trust allowance (Harris, Mossbourne and others mention one in their adverts). Eligible maths teachers at eligible state secondary schools can also claim a <a href="https://www.gov.uk/guidance/targeted-retention-incentive-payments-for-school-teachers" target="_blank" rel="noopener">targeted retention incentive</a> of £3,000 to £6,000, depending on the school.</p>
+
+        <h3>Reading an advert</h3>
+        <dl class="defs">
+          <div><dt>MPS, MPR, M1–M6</dt><dd>Main pay scale. Adverts open to ECTs usually say this. “UPS only” or a TLR means an experienced teacher.</dd></div>
+          <div><dt>TLR</dt><dd>Teaching and learning responsibility payment, for roles like second in department or KS5 lead. Rarely an ECT post.</dd></div>
+          <div><dt>KS5, post-16</dt><dd>A level teaching. Some schools give ECTs a Year 12 class in their first year; ask how much.</dd></div>
+          <div><dt>Mentoring, ECF, ITTECF</dt><dd>Signs the school has thought about induction. The site picks these words out of each advert.</dd></div>
+        </dl>
+
+        <h3>Questions worth asking at interview</h3>
+        <ul>
+          <li>Who would my mentor be, and how much time do they get for it?</li>
+          <li>Which key stages would I teach in my first year? Is there any A level or further maths?</li>
+          <li>How are classes set, and which scheme of work does the department follow?</li>
+          <li>How many maths teachers are there, and how many joined in the last two years?</li>
+          <li>How does the behaviour policy work in practice in a maths lesson?</li>
+        </ul>
+
+        <h3>How to read the school results</h3>
+        <dl class="defs">
+          <div><dt>GCSE maths grade 4+</dt><dd>Share of pupils at the end of Year 11 who got at least a 4 (a standard pass) in GCSE maths. Grade 5+ is a strong pass. From the DfE key stage 4 tables, <span id="guide-gcse-year">2024/25</span>.</dd></div>
+          <div><dt>A level average</dt><dd>The DfE average point score per A level entry, shown as a grade (for example B−). From the 16 to 18 tables, <span id="guide-alevel-year">2024/25</span>.</dd></div>
+          <div><dt>UCAS points</dt><dd>The DfE scale (A* = 60 … E = 10) converts exactly to UCAS tariff points (A* = 56 … E = 16): <span class="math">tariff = 0.8 × points + 8</span>. “≈ 3 A levels” is three times the per-entry figure, so a B− average is about 112.</dd></div>
+          <div><dt>A level maths uptake</dt><dd>Share of the school’s A level students who took maths, and further maths. A high number means a strong post-16 maths department to teach in.</dd></div>
+          <div><dt>Progress 8</dt><dd>Not published for 2025 or 2026 because pupils have no key stage 2 results from 2020 and 2021.</dd></div>
+        </dl>
+
+        <p class="links-row">
+          <a href="https://www.gov.uk/government/publications/induction-for-early-career-teachers-england" target="_blank" rel="noopener">Statutory induction guidance</a>
+          <a href="https://www.gov.uk/government/publications/initial-teacher-training-and-early-career-framework" target="_blank" rel="noopener">The ITTECF</a>
+          <a href="https://www.gov.uk/government/publications/school-teachers-pay-and-conditions" target="_blank" rel="noopener">Teachers’ pay and conditions</a>
+        </p>
+      </div>
+    </section>
+
+    <!-- SOURCES -->
+    <section id="sources" class="panel prose-panel" role="tabpanel" aria-labelledby="tab-sources" hidden>
+      <div class="prose wide">
+        <h2>Where the jobs come from</h2>
+        <p class="lede">Each board is searched for maths roles in London, then every advert is matched to its school using the DfE’s school register. The same job on several boards is shown once, with a link to each.</p>
+        <div class="source-grid" id="source-grid"></div>
+
+        <h3>Also worth checking</h3>
+        <p>These sites are not collected automatically, but often carry London maths posts first.</p>
+        <ul class="link-list">
+          <li><a href="https://www.harriscareers.org.uk/" target="_blank" rel="noopener">Harris Federation careers</a> <span>about 50 London academies</span></li>
+          <li><a href="https://arkonline.org/careers" target="_blank" rel="noopener">Ark careers</a> <span>London academy trust</span></li>
+          <li><a href="https://www.unitedlearning.org.uk/careers" target="_blank" rel="noopener">United Learning careers</a> <span>national trust with London schools</span></li>
+          <li><a href="https://www.oasiscommunitylearning.org/careers" target="_blank" rel="noopener">Oasis Community Learning careers</a> <span>south and east London academies</span></li>
+          <li><a href="https://www.fejobs.com/" target="_blank" rel="noopener">FE Jobs</a> <span>sixth form and FE college lecturing</span></li>
+          <li><a href="https://jobs.theguardian.com/searchjobs/?Keywords=maths+teacher&amp;Location=London" target="_blank" rel="noopener">Guardian Jobs</a> <span>occasional school posts</span></li>
+        </ul>
+
+        <h3>About the data</h3>
+        <ul>
+          <li>Schools: open state-funded secondary, all-through and 16–19 schools, sixth form colleges and FE colleges in the 33 London local authorities, from Get Information About Schools.</li>
+          <li>Results: DfE school and college performance tables (key stage 4, 16 to 18, and A level maths and science), <span id="data-years">2024/25</span>.</li>
+          <li>Job details, closing dates and ECT flags come from each job board. Always check the original advert before applying.</li>
+          <li>School and results data are © Crown copyright, published under the <a href="https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/" target="_blank" rel="noopener">Open Government Licence v3.0</a>. Map data © OpenStreetMap contributors, map tiles © CARTO.</li>
+        </ul>
+        <p class="refresh-row" id="refresh-row" hidden>
+          <button type="button" class="button" id="refresh-button">Check the job boards now</button>
+          <span id="refresh-status" class="hint"></span>
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>Square One collects public job adverts and DfE data to help new maths teachers find a first post. It is not affiliated with any job board or school.</p>
+  </footer>
+
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="app.js" type="module"></script>
+</body>
+</html>

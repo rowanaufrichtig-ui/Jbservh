@@ -1,0 +1,17 @@
+{
+  "name": "london-maths-ect-jobs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Maths teaching jobs in London state schools and sixth forms, gathered from Teaching Vacancies, TES, MyNewTerm and Eteach, with a map of schools and their GCSE maths and A level results.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "schools": "node scripts/build-schools.mjs",
+    "jobs": "node scripts/scrape-jobs.mjs",
+    "build": "node scripts/build-schools.mjs && node scripts/scrape-jobs.mjs",
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

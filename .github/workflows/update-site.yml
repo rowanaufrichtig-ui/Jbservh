@@ -1,0 +1,83 @@
+name: Update jobs and publish site
+
+on:
+  schedule:
+    # Twice a day (UTC). Schools data is rebuilt on Mondays.
+    - cron: "17 5 * * *"
+    - cron: "17 15 * * *"
+  workflow_dispatch:
+    inputs:
+      rebuild_schools:
+        description: "Also re-download the DfE school register and performance tables"
+        type: boolean
+        default: false
+  push:
+    paths:
+      - "public/**"
+      - "scripts/**"
+      - "package.json"
+      - ".github/workflows/update-site.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Pages only deploys from the default branch; pushes elsewhere just run the tests.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Restore last run's data and downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache
+            public/data/jobs.json
+            public/data/schools.json
+            scripts/data/london-establishments.json
+          key: site-data-${{ github.run_id }}
+          restore-keys: site-data-
+
+      - name: Rebuild school data (Mondays, or when asked)
+        if: github.event_name == 'workflow_dispatch' && inputs.rebuild_schools || github.event_name == 'schedule'
+        run: |
+          if [ "${{ inputs.rebuild_schools }}" = "true" ] || [ "$(date -u +%u)" = "1" ] || [ ! -s public/data/schools.json ]; then
+            npm run schools || echo "::warning::School data rebuild failed; keeping the previous schools.json"
+          else
+            echo "Not Monday; keeping the existing school data."
+          fi
+
+      - name: Collect jobs from the job boards
+        run: npm run jobs
+
+      - name: Upload site
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
