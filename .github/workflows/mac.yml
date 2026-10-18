@@ -1,0 +1,65 @@
+name: Build Mac app
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "public/**"
+      - "scripts/**"
+      - "desktop/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/mac.yml"
+
+permissions:
+  contents: write # to update the "mac-latest" release
+
+jobs:
+  mac:
+    runs-on: macos-latest # Apple Silicon
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm test
+
+      - name: Refresh the jobs bundled with the app
+        run: npm run jobs || echo "::warning::Could not refresh jobs; bundling the committed data"
+
+      - name: Build the .dmg (Apple Silicon and Intel)
+        run: npm run desktop:mac
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      # Launch the built app on this Mac: it must render the jobs and the
+      # map, and a live "Check now" must succeed, or the build fails.
+      - name: Check the app runs
+        run: |
+          SQUAREONE_SMOKE=1 SQUAREONE_SCREENSHOT="$PWD/dist-desktop/screenshot.png" \
+            "dist-desktop/mac-arm64/Square One.app/Contents/MacOS/Square One"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SquareOne-mac
+          path: |
+            dist-desktop/SquareOne-mac-*.dmg
+            dist-desktop/screenshot.png
+
+      - name: Update the mac-latest release
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete mac-latest --yes --cleanup-tag || true
+          gh release create mac-latest \
+            dist-desktop/SquareOne-mac-arm64.dmg dist-desktop/SquareOne-mac-x64.dmg \
+            dist-desktop/SquareOne-mac-arm64.zip dist-desktop/SquareOne-mac-x64.zip \
+            --target "$GITHUB_SHA" \
+            --title "Square One for Mac" \
+            --notes "Built from ${GITHUB_SHA::7}. Download SquareOne-mac-arm64.dmg for Apple Silicon Macs (M1 and later) or SquareOne-mac-x64.dmg for Intel Macs, open it and drag Square One to Applications. The app is not notarised by Apple: the first time you open it, click Done, then go to System Settings > Privacy & Security and click Open Anyway."

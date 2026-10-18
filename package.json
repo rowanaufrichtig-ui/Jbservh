@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "description": "Maths teaching jobs in London state schools and sixth forms, gathered from Teaching Vacancies, TES, MyNewTerm and Eteach, with a map of schools and their GCSE maths and A level results.",
+  "author": "Square One",
   "type": "module",
+  "main": "desktop/main.mjs",
   "engines": {
     "node": ">=20"
   },
@@ -15,11 +17,58 @@
     "test": "node --test test/*.test.mjs",
     "app:web": "node scripts/build-app-web.mjs",
     "android:sync": "node scripts/build-app-web.mjs && cap sync android",
-    "android:apk": "node scripts/build-app-web.mjs && cap sync android && cd android && ./gradlew assembleDebug"
+    "android:apk": "node scripts/build-app-web.mjs && cap sync android && cd android && ./gradlew assembleDebug",
+    "desktop": "node scripts/build-app-web.mjs && electron .",
+    "desktop:mac": "node scripts/build-app-web.mjs && electron-builder --mac"
   },
   "devDependencies": {
     "@capacitor/android": "8.5.3",
     "@capacitor/cli": "8.5.3",
-    "@capacitor/core": "8.5.3"
+    "@capacitor/core": "8.5.3",
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "io.github.rowanaufrichtigui.squareone",
+    "productName": "Square One",
+    "copyright": "School data \u00a9 Crown copyright (OGL v3.0); map data \u00a9 OpenStreetMap contributors",
+    "directories": {
+      "output": "dist-desktop",
+      "buildResources": "desktop/build"
+    },
+    "files": [
+      "package.json",
+      "desktop/main.mjs",
+      "desktop/preload.cjs",
+      "app-web/**/*"
+    ],
+    "asar": false,
+    "afterPack": "desktop/after-pack.cjs",
+    "mac": {
+      "category": "public.app-category.education",
+      "icon": "desktop/build/icon.png",
+      "identity": null,
+      "minimumSystemVersion": "12.0",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "SquareOne-mac-${arch}.${ext}"
+    },
+    "dmg": {
+      "title": "Square One"
+    }
   }
 }

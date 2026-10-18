@@ -7,14 +7,15 @@ exercise-book margin line from the website's masthead.
     pip install pillow
     python3 scripts/make-app-icons.py
 
-Writes into android/app/src/main/res. Re-run after `npx cap add android`.
+Writes into android/app/src/main/res (re-run after `npx cap add android`)
+and desktop/build/icon.png for the Mac app.
 """
 
 import io
 import urllib.request
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
 RES = ROOT / "android" / "app" / "src" / "main" / "res"
@@ -104,7 +105,22 @@ def save(img, path):
     print("wrote", path.relative_to(ROOT))
 
 
+def mac_icon():
+    """1024px macOS app icon: the Big Sur rounded square (824px, radius 185)
+    with a soft drop shadow, as Apple's icon template lays it out."""
+    size, body, radius = 1024, 824, 185
+    off = (size - body) // 2
+    icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    shadow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).rounded_rectangle([off, off + 12, off + body, off + body + 12], radius=radius, fill=(0, 0, 0, 80))
+    icon.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(14)))
+    face = Image.alpha_composite(background(body, body), mark(body, scale=1.1))
+    icon.alpha_composite(rounded(face, radius / body), (off, off))
+    save(icon, ROOT / "desktop" / "build" / "icon.png")
+
+
 def main():
+    mac_icon()
     for name, k in DENSITIES.items():
         mip = RES / f"mipmap-{name}"
         fg = round(108 * k)

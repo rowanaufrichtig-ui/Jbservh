@@ -626,8 +626,8 @@ function renderSources() {
 
 async function setupRefresh() {
   // Only the local server (npm start) has an API; GitHub Pages does not,
-  // and the Android app refreshes on the phone instead.
-  if (NATIVE) return;
+  // and the apps refresh themselves instead.
+  if (IN_APP) return;
   try {
     const res = await fetch('api/status', { cache: 'no-store' });
     if (!res.ok) return;
@@ -677,8 +677,12 @@ function route() {
 }
 
 // ---------- boot ----------
-// Inside the Android app the page can check the job boards itself.
+// Inside the apps the page can check the job boards itself: on Android by
+// running the pipeline here over Capacitor's native HTTP, on the desktop by
+// asking Electron's main process to run it.
 const NATIVE = Boolean(window.Capacitor?.isNativePlatform?.());
+const DESKTOP = window.squareOneDesktop ?? null;
+const IN_APP = NATIVE || Boolean(DESKTOP);
 const CACHE_KEY = 'sq1-jobs';
 const AUTO_REFRESH_HOURS = 6;
 
@@ -692,7 +696,7 @@ function applyJobs(data) {
 
 async function loadJobs() {
   const bundled = await (await fetch('data/jobs.json', { cache: 'no-cache' })).json();
-  const cached = NATIVE ? store.get(CACHE_KEY, null) : null;
+  const cached = IN_APP ? store.get(CACHE_KEY, null) : null;
   applyJobs(cached?.jobs && cached.generated > bundled.generated ? cached : bundled);
 }
 
@@ -711,16 +715,17 @@ function refreshOnDevice() {
   refreshing = (async () => {
     setSync('Checking the job boards…', true);
     try {
-      const [{ buildJobsData }, establishments] = await Promise.all([
-        import('./engine/lib/pipeline.js'),
-        fetch('data/london-establishments.json').then((r) => r.json()),
-      ]);
-      const data = await buildJobsData({
-        schools: state.schools,
-        establishments,
-        previous: { jobs: state.jobs },
-        onProgress: ({ step, total, source }) => setSync(`Checking ${source} (${step} of ${total})…`, true),
-      });
+      const onProgress = ({ step, total, source }) => setSync(`Checking ${source} (${step} of ${total})…`, true);
+      let data;
+      if (DESKTOP) {
+        data = await DESKTOP.refreshJobs({ jobs: state.jobs }, onProgress);
+      } else {
+        const [{ buildJobsData }, establishments] = await Promise.all([
+          import('./engine/lib/pipeline.js'),
+          fetch('data/london-establishments.json').then((r) => r.json()),
+        ]);
+        data = await buildJobsData({ schools: state.schools, establishments, previous: { jobs: state.jobs }, onProgress });
+      }
       if (!data.sources.some((s) => s.ok)) throw new Error('none of the job boards answered');
       const before = new Set(state.jobs.map(jobKey));
       const fresh = data.jobs.filter((j) => !before.has(jobKey(j))).length;
@@ -740,7 +745,7 @@ function refreshOnDevice() {
 
 function setupSync() {
   setSync(`Jobs checked ${stampFmt.format(new Date(state.generated))}`);
-  if (!NATIVE) return;
+  if (!IN_APP) return;
   document.documentElement.classList.add('native');
   $('#sync-button').hidden = false;
   $('#sync-button').addEventListener('click', refreshOnDevice);
@@ -748,8 +753,13 @@ function setupSync() {
   $('#refresh-button').addEventListener('click', refreshOnDevice);
   // Check automatically when the jobs are more than a few hours old, unless
   // the phone is offline or in data saver mode.
-  const ageHours = (Date.now() - new Date(state.generated)) / 36e5;
-  if (ageHours > AUTO_REFRESH_HOURS && navigator.onLine !== false && !navigator.connection?.saveData) refreshOnDevice();
+  const checkIfStale = () => {
+    const ageHours = (Date.now() - new Date(state.generated)) / 36e5;
+    if (ageHours > AUTO_REFRESH_HOURS && navigator.onLine !== false && !navigator.connection?.saveData) refreshOnDevice();
+  };
+  checkIfStale();
+  // A desktop window can stay open for days.
+  setInterval(checkIfStale, 30 * 60 * 1000);
 }
 
 function renderAll() {

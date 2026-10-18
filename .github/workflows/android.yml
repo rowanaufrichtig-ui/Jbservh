@@ -34,6 +34,8 @@ jobs:
           cache: gradle
 
       - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1" # only the Mac app needs it
       - run: npm test
 
       - name: Refresh the jobs bundled with the app

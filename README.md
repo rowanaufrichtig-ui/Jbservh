@@ -57,7 +57,7 @@ figure.
 ## Running it
 
 Needs Node.js 20 or later. The website and the data scripts have no
-dependencies; `npm install` is only needed to build the Android app.
+dependencies; `npm install` is only needed to build the Android and Mac apps.
 
 ```bash
 npm start            # serves the site at http://localhost:8080
@@ -122,6 +122,39 @@ The **Build Android app** workflow (`.github/workflows/android.yml`) builds the
 APK on every push that touches the app, refreshes the bundled jobs first, and
 on the default branch republishes it as the `android-latest` release.
 
+## Mac app
+
+The site also runs as a desktop app built with [Electron](https://www.electronjs.org).
+Like the Android app it checks the job boards itself: when you open it, when
+the jobs are more than 6 hours old, every half hour while it stays open, and
+whenever you press **Check now**. Job adverts and school websites open in
+your normal browser.
+
+### Installing
+
+1. From the **mac-latest** release on GitHub, download
+   `SquareOne-mac-arm64.dmg` for an Apple Silicon Mac (M1 or later) or
+   `SquareOne-mac-x64.dmg` for an Intel Mac. It needs macOS 12 or later.
+2. Open the .dmg and drag **Square One** into Applications.
+3. The app is not notarised by Apple (that needs a paid developer account), so
+   the first time you open it macOS will say it cannot check it. Click
+   **Done**, then open **System Settings → Privacy & Security**, scroll down
+   and click **Open Anyway**. Or run
+   `xattr -dr com.apple.quarantine "/Applications/Square One.app"` in Terminal.
+
+### Building it yourself
+
+```bash
+npm install
+npm run desktop       # run it from source (any platform)
+npm run desktop:mac   # build dist-desktop/SquareOne-mac-*.dmg (on a Mac)
+```
+
+The **Build Mac app** workflow (`.github/workflows/mac.yml`) builds both .dmg
+files on a GitHub macOS runner, launches the app there to check it renders and
+can fetch live jobs (`SQUAREONE_SMOKE=1`), and on the default branch
+republishes them as the `mac-latest` release.
+
 ## Publishing on GitHub Pages
 
 The workflow in `.github/workflows/update-site.yml` checks the job boards twice a
@@ -151,6 +184,7 @@ scripts/
   build-app-web.mjs     assembles app-web/ for the Android app
   make-app-icons.py     draws the app icon and splash screens
 server.mjs              local static server with a refresh endpoint
+desktop/                Electron main process, preload and Mac icon
 android/                Capacitor Android project
 capacitor.config.json   app id, name and web folder
 test/                   node:test unit tests
