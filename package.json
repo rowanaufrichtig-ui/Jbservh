@@ -19,7 +19,7 @@
     "android:sync": "node scripts/build-app-web.mjs && cap sync android",
     "android:apk": "node scripts/build-app-web.mjs && cap sync android && cd android && ./gradlew assembleDebug",
     "desktop": "node scripts/build-app-web.mjs && electron .",
-    "desktop:mac": "node scripts/build-app-web.mjs && electron-builder --mac"
+    "desktop:mac": "node scripts/build-app-web.mjs && electron-builder --mac --publish never"
   },
   "devDependencies": {
     "@capacitor/android": "8.5.3",
