@@ -1,30 +1,48 @@
 #!/usr/bin/env node
-// Builds public/data/schools.json: every open, state-funded mainstream
-// secondary school, all-through school, 16-19 academy/free school and
-// sixth form college in London, with location, key facts, GCSE maths and
-// A level results from the DfE performance tables.
+// Builds the school data the site maps: every open, state-funded mainstream
+// secondary school, all-through school, 16-19 school, sixth form college and
+// FE college in England, with GCSE maths and A level results from the DfE
+// performance tables, plus maintained secondary and middle schools in Wales.
+//
+// Output, one file per region so the site only loads what an area needs:
+//   public/data/schools/index.json        regions, years, comparison averages
+//   public/data/schools/<region>.json     the schools
+//   scripts/data/establishments/<region>.json   every school, for matching job adverts
 //
 // Sources (all Open Government Licence):
 //  - Get Information About Schools (GIAS) daily extract
-//  - DfE school and college performance tables: KS4 final, 16-18 final, and
-//    the "A level maths and science" breakdown.
+//  - DfE school-level results on Explore Education Statistics: key stage 4
+//    performance, 16-19 performance, and 16-19 subject entries (England only)
+//  - Welsh Government address list of schools (Wales publishes no
+//    school-level exam results)
 
-import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getBuffer, getText } from './lib/http.mjs';
 import { parseCSVObjects } from './lib/csv.mjs';
-import { readZip } from './lib/zip.mjs';
-import { readSheet } from './lib/xlsx.mjs';
+import { readOdsObjects } from './lib/ods.mjs';
 import { osgbToLatLon } from './lib/osgb.mjs';
-import { BOROUGH_BY_LA, BOROUGHS } from './lib/london.mjs';
+import { payAreaFor, tidyDistrict } from './lib/places.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CACHE = join(ROOT, '.cache');
-const OUT = join(ROOT, 'public', 'data', 'schools.json');
-const INDEX_OUT = join(ROOT, 'scripts', 'data', 'london-establishments.json');
+const OUT_DIR = join(ROOT, 'public', 'data', 'schools');
+const INDEX_DIR = join(ROOT, 'scripts', 'data', 'establishments');
+const WALES_LIST_PAGE = 'https://www.gov.wales/address-list-schools';
 
-const PERF = 'https://www.compare-school-performance.service.gov.uk/download-data';
+// Explore Education Statistics data sets (CSV). Each new release gets new
+// IDs: when the DfE publishes next year's results, find the data sets with
+// these titles in the data catalogue and replace the IDs.
+const EES = 'https://explore-education-statistics.service.gov.uk/data-catalogue/data-set';
+const DATA_SETS = {
+  // "Key stage 4 institution level - Performance", 2025/26 release
+  ks4: 'bf138f04-daa2-4759-b950-937a17a4c675',
+  // "Schools and colleges - performance" (16 to 19 performance), 2025/26 release
+  ks5: '4df51bd5-cd1c-422c-9e0e-58d772dc97e5',
+  // "Schools and colleges - subject entries and grades" (16 to 19 performance), 2025/26 release
+  ks5Subjects: 'ae56d974-89ca-4ff4-bdbf-d3caf425ccab',
+};
 const GIAS = 'https://ea-edubase-api-prod.azurewebsites.net/edubase/downloads/public';
 
 const log = (...a) => console.log('[schools]', ...a);
@@ -60,52 +78,12 @@ async function downloadGias() {
   throw new Error('Could not download GIAS extract');
 }
 
-async function perfYears() {
-  const html = await getText(PERF);
-  return [...html.matchAll(/<option value="(\d{4}-\d{4})"/g)].map((m) => m[1]);
-}
-
-// Download one performance-tables dataset by walking the site's download
-// wizard and following the link it offers. A single dataset comes back as
-// the bare file (CSV or XLSX); several come back zipped.
-async function perfFile(year, datatype) {
-  return cached(`perf-${year}-${datatype}.bin`, async () => {
-    const q = new URLSearchParams({ currentstep: 'datatypes', regiontype: 'all', la: '0', downloadYear: year, datatypes: datatype });
-    const step = `${PERF}?${q}`;
-    const page = await getText(step);
-    // Spreadsheet-only datasets (like the maths and science one) only offer XLS.
-    const href = (page.match(/id="download-file-format-by-csv-link" href="([^"]+)"/) ??
-      page.match(/id="download-file-format-by-xls-link" href="([^"]+)"/))?.[1];
-    if (!href) throw new Error(`not published for ${year}`);
-    const url = new URL(href.replace(/&amp;/g, '&'), PERF).href;
-    const buf = await getBuffer(url, { headers: { Referer: step }, timeout: 300000 });
-    if (/^\s*</.test(buf.subarray(0, 200).toString('utf8'))) throw new Error('download was blocked or returned HTML');
-    return buf;
-  });
-}
-
-const isZip = (buf) => buf.readUInt32LE(0) === 0x04034b50;
-
-// Newest year (of the few most recent) that has the dataset.
-async function latestPerf(years, datatype, filePattern) {
-  for (const year of years.slice(0, 3)) {
-    try {
-      let buf = await perfFile(year, datatype);
-      if (isZip(buf)) {
-        const zip = readZip(buf);
-        if (!zip.names.includes('xl/workbook.xml')) {
-          const name = zip.find(filePattern);
-          if (!name) throw new Error('expected file not in download');
-          buf = zip.read(name);
-        }
-      }
-      log(`${datatype}: using ${year}`);
-      return { year, buf };
-    } catch (e) {
-      log(`${datatype} ${year}: ${e.message}`);
-    }
-  }
-  throw new Error(`No ${datatype} data found`);
+async function eesCSV(key) {
+  const buf = await cached(`ees-${DATA_SETS[key]}.csv`, () => getBuffer(`${EES}/${DATA_SETS[key]}/csv`, { timeout: 600000 }));
+  if (/^\s*</.test(buf.subarray(0, 200).toString('utf8'))) throw new Error(`${key}: got HTML instead of CSV`);
+  const rows = parseCSVObjects(buf.toString('utf8'));
+  log(`${key}: ${rows.length} rows`);
+  return rows;
 }
 
 // ---------- helpers ----------
@@ -118,7 +96,8 @@ const num = (v) => {
 };
 const round = (v, dp = 1) => (v === null ? null : Math.round(v * 10 ** dp) / 10 ** dp);
 
-const academicYear = (year) => year.replace('-', '/').replace(/\/20(\d\d)$/, '/$1');
+// "202526" -> "2025/26"
+const academicYear = (period) => `${period.slice(0, 4)}/${period.slice(4)}`;
 
 // DfE A level points (A*=60 ... E=10) map linearly onto UCAS tariff points
 // (A*=56 ... E=16): tariff = 0.8 * points + 8. So an average per entry
@@ -165,9 +144,9 @@ const MAINSTREAM_TYPES = new Set([
 ]);
 const SECONDARY_PHASES = new Set(['Secondary', 'All-through', '16 plus', 'Middle deemed secondary']);
 
+// England: open state-funded mainstream secondary/16-19 schools and colleges.
 function include(g) {
-  if (g['GOR (name)'] !== 'London') return false;
-  if (!g['EstablishmentStatus (name)'].startsWith('Open')) return false;
+  if (!g['EstablishmentStatus (name)'].startsWith('Open') || !REGION_SLUG[g['GOR (name)']]) return false;
   const type = g['TypeOfEstablishment (name)'];
   if (type === 'Further education') {
     const fe = g['FurtherEducationType (name)'] ?? '';
@@ -191,87 +170,212 @@ function website(url) {
   return /^https?:\/\//i.test(url) ? url : `https://${url.replace(/^\/+/, '')}`;
 }
 
+const REGION_SLUG = {
+  London: 'london',
+  'South East': 'south-east',
+  'South West': 'south-west',
+  'East of England': 'east-of-england',
+  'East Midlands': 'east-midlands',
+  'West Midlands': 'west-midlands',
+  'Yorkshire and the Humber': 'yorkshire-and-the-humber',
+  'North West': 'north-west',
+  'North East': 'north-east',
+  Wales: 'wales',
+};
+
+// ---------- Wales ----------
+
+async function downloadWalesList() {
+  return cached('wales-schools.ods', async () => {
+    const page = await getText(WALES_LIST_PAGE);
+    const href = page.match(/href="([^"]+\.ods)"/)?.[1];
+    if (!href) throw new Error('No .ods link on the Welsh Government page');
+    return getBuffer(new URL(href, WALES_LIST_PAGE).href);
+  }, 24 * 14);
+}
+
+const LANGUAGE = [
+  [/^Welsh medium/i, 'Welsh-medium'],
+  [/^Dual language/i, 'Dual stream (Welsh and English)'],
+  [/^English medium/i, 'English-medium'],
+];
+const titleCase = (s) => (s === s.toUpperCase() ? s.toLowerCase().replace(/\b([a-z])/g, (c) => c.toUpperCase()) : s);
+
+function welshSchools(ods, giasByLaestab) {
+  const maintained = readOdsObjects(ods, 'Maintained');
+  const independent = readOdsObjects(ods, 'Independent');
+  const pru = readOdsObjects(ods, 'PRU');
+  const schools = [];
+  const index = [];
+  const kindOfSector = { Primary: 'primary', Nursery: 'primary', Special: 'special', Secondary: 'state', Middle: 'state' };
+  for (const [rows, fixedKind] of [[maintained, null], [independent, 'independent'], [pru, 'special']]) {
+    for (const w of rows) {
+      const number = w['School Number'];
+      if (!/^\d{7}$/.test(number)) continue;
+      const g = giasByLaestab.get(number);
+      const name = g?.EstablishmentName ?? titleCase(w['School Name']);
+      const kind = fixedKind ?? kindOfSector[w.Sector] ?? 'state';
+      const urn = g?.URN ?? `W${number}`;
+      index.push({ urn, name, postcode: w.Postcode, kind });
+      if (fixedKind || !['Secondary', 'Middle'].includes(w.Sector)) continue;
+
+      const ages = w['School Type'].match(/ages (\d+)-(\d+)/);
+      const pos = g ? osgbToLatLon(g.Easting, g.Northing) : null;
+      const language = LANGUAGE.find(([re]) => re.test(w['School Language Category - see notes']))?.[1] ?? null;
+      const la = w['Local Authority'];
+      schools.push({
+        urn,
+        welshNumber: number,
+        name,
+        category: w.Sector === 'Middle' ? 'all-through' : 'secondary',
+        type: `${w['Governance - see notes']} school`.replace(/^(.)/, (c) => c.toUpperCase()),
+        ageRange: ages ? `${ages[1]}–${ages[2]}` : null,
+        hasSixthForm: ages ? Number(ages[2]) >= 18 : false,
+        gender: null,
+        religion: /^-+$|^$/.test(w['Religious Character']) ? null : w['Religious Character'],
+        admissions: null,
+        language,
+        trust: null,
+        pupils: num(w['Pupils - see notes']),
+        capacity: null,
+        fsm: null,
+        la,
+        district: la,
+        region: 'Wales',
+        country: 'Wales',
+        payArea: 'Wales',
+        address: [w['Address 1'], w['Address 2'], w['Address 3'], w['Address 4']].filter(Boolean).join(', '),
+        postcode: w.Postcode,
+        website: website(g?.SchoolWebsite),
+        phone: w['Phone Number'] || null,
+        lat: pos?.lat ?? null,
+        lon: pos?.lon ?? null,
+        gcse: null,
+        alevel: null,
+        links: {
+          mylocalschool: `https://mylocalschool.gov.wales/School/${number}?lang=en`,
+          estyn: `https://www.estyn.gov.wales/provider/${number}`,
+        },
+      });
+    }
+  }
+  return { schools, index };
+}
+
+// Postcode centroids for the few Welsh schools GIAS has no grid reference for.
+async function fillMissingPositions(schools) {
+  const missing = schools.filter((s) => s.lat == null && s.postcode);
+  if (!missing.length) return;
+  const { lookupPostcodes } = await import('./lib/geo.mjs');
+  const places = await lookupPostcodes(missing.map((s) => s.postcode.toUpperCase()));
+  for (const s of missing) {
+    const p = places.get(s.postcode.toUpperCase());
+    if (p) [s.lat, s.lon] = [p.lat, p.lon];
+  }
+  log(`Located ${missing.filter((s) => s.lat != null).length} of ${missing.length} Welsh schools by postcode`);
+}
+
 // ---------- main ----------
 
 async function main() {
   const giasRows = parseCSVObjects(await downloadGias());
   log(`GIAS rows: ${giasRows.length}`);
 
-  const years = await perfYears();
-  log(`Performance table years offered: ${years.slice(0, 3).join(', ')} ...`);
-  const ks4 = await latestPerf(years, 'ks4', /england_ks4final\.csv$/);
-  const ks5 = await latestPerf(years, 'ks5', /england_ks5final\.csv$/);
-  const ms = await latestPerf(years, 'ks5mathsci', /maths-science\.xlsx$/);
+  // Key stage 4: one row per school per pupil breakdown and year; keep the
+  // all-pupils rows for the latest year and the one before it.
+  const ks4All = (await eesCSV('ks4')).filter((r) => r.breakdown_topic === 'Total' && r.sex === 'Total' && r.disadvantage_status === 'Total');
+  const ks4Periods = [...new Set(ks4All.map((r) => r.time_period))].sort().reverse();
+  const [ks4Year, ks4Prev] = ks4Periods;
+  const ks4Rows = ks4All.filter((r) => r.time_period === ks4Year);
+  const ks4ByUrn = new Map(ks4Rows.map((r) => [r.school_urn, r]));
+  const ks4PrevByUrn = new Map(ks4All.filter((r) => r.time_period === ks4Prev).map((r) => [r.school_urn, r]));
+  const ks4Provisional = ks4Rows.some((r) => r.version === 'Provisional');
 
-  const ks4Rows = parseCSVObjects(ks4.buf.toString('utf8'));
-  const ks5Rows = parseCSVObjects(ks5.buf.toString('utf8'));
-  const msSheet = readSheet(ms.buf, 'england_ks5maths-science');
-  const msHeader = msSheet[0];
-  const msRows = msSheet.slice(1).map((r) => Object.fromEntries(msHeader.map((h, i) => [h, r[i]])));
+  // 16-19: the A level cohort rows for all students.
+  const ks5All = (await eesCSV('ks5')).filter((r) => r.exam_cohort === 'A level' && r.disadvantage_status === 'Total');
+  const [ks5Year, ks5Prev] = [...new Set(ks5All.map((r) => r.time_period))].sort().reverse();
+  const ks5Rows = ks5All.filter((r) => r.time_period === ks5Year);
+  const ks5ByUrn = new Map(ks5Rows.map((r) => [r.school_urn, r]));
+  const ks5PrevByUrn = new Map(ks5All.filter((r) => r.time_period === ks5Prev).map((r) => [r.school_urn, r]));
 
-  const ks4ByUrn = new Map(ks4Rows.filter((r) => r.RECTYPE === '1').map((r) => [r.URN, r]));
-  const ks5ByUrn = new Map(ks5Rows.filter((r) => r.RECTYPE === '1').map((r) => [r.URN, r]));
-  const msByUrn = new Map(msRows.map((r) => [String(r['Unique reference number']), r]));
+  // A level maths and further maths entries per school (latest year).
+  const maths = new Map();
+  for (const r of await eesCSV('ks5Subjects')) {
+    if (r.qualification_detailed !== 'GCE A level' || !/^Mathematics( \(Further\))?$/.test(r.subject)) continue;
+    const m = maths.get(r.school_urn) ?? { entries: null, aStarA: 0, aStarAKnown: true, further: null };
+    const n = num(r.entries_count);
+    if (r.subject === 'Mathematics') {
+      if (r.grade === 'Total exam entries') m.entries = n;
+      else if (r.grade === 'A*' || r.grade === 'A') n === null ? (m.aStarAKnown = false) : (m.aStarA += n);
+    } else if (r.grade === 'Total exam entries') m.further = n;
+    maths.set(r.school_urn, m);
+  }
 
-  const gcseOf = (r) =>
+  const gcseOf = (r, prev) =>
     r && {
-      pupils: num(r.TPUP),
-      maths4: num(r.PTEBACMAT_94),
-      maths5: num(r.PTEBACMAT_95),
-      engMaths4: num(r.PTL2BASICS_94),
-      engMaths5: num(r.PTL2BASICS_95),
-      att8: num(r.ATT8SCR),
-      att8Maths: num(r.ATT8SCRMAT),
-      p8: num(r.P8MEA),
+      pupils: num(r.pupil_count),
+      maths4: num(r.mat_94_percent),
+      maths5: num(r.mat_95_percent),
+      engMaths4: num(r.engmath_94_percent),
+      engMaths5: num(r.engmath_95_percent),
+      att8: num(r.attainment8_average),
+      att8Maths: num(r.attainment8mat_average),
+      maths4Prev: num(prev?.mat_94_percent),
     };
 
-  const alevelOf = (r, m) => {
-    if (!r && !m) return null;
-    const aps = num(r?.TALLPPE_ALEV_1618);
-    const ucas = ucasFromAps(aps);
+  const pct = (part, whole) => (part == null || !whole ? null : round((100 * part) / whole));
+  const alevelOf = (r, prev, m) => {
+    if (!r) return null;
+    const aps = num(r.aps_per_entry);
+    const best3 = num(r.best_three_alevels_aps);
+    const students = num(r.aps_per_entry_student_count);
+    const perEntry = ucasFromAps(aps);
     return {
-      students: num(r?.TALLPUP_ALEV_1618),
+      students,
       aps,
-      grade: cleanGrade(r?.TALLPPEGRD_ALEV_1618, aps),
-      ucasPerEntry: ucas,
-      ucas3: ucas === null ? null : Math.round(ucas * 3),
-      aab2fac: num(r?.PTAAB_2FAC),
-      va: num(r?.VA_INS_ALEV),
-      progressBand: r?.PROGRESS_BAND_ALEV && !/^(NE|SUPP|NP|x|z|c)$/i.test(r.PROGRESS_BAND_ALEV) ? r.PROGRESS_BAND_ALEV : null,
-      apsPrev: num(r?.TALLPPE_ALEV_1618_24),
-      gradePrev: cleanGrade(r?.TALLPPEGRD_ALEV_1618_24, num(r?.TALLPPE_ALEV_1618_24)),
-      mathsPct: num(m?.A_level_maths_percent_all),
-      furtherMathsPct: num(m?.A_level_further_maths_percent_all),
+      grade: cleanGrade(r.aps_per_entry_grade, aps),
+      ucasPerEntry: perEntry,
+      // "UCAS points for three": from the DfE's best-three-A-levels average
+      // where published, otherwise three times the per-entry average.
+      ucas3: best3 != null ? Math.round(3 * ucasFromAps(best3)) : perEntry == null ? null : Math.round(3 * perEntry),
+      best3Grade: cleanGrade(r.best_three_alevels_grade, best3),
+      aab: num(r.aab_percent),
+      va: num(r.value_added),
+      progressBand: /^z$|^$/.test(r.progress_banding) ? null : r.progress_banding,
+      apsPrev: num(prev?.aps_per_entry),
+      gradePrev: cleanGrade(prev?.aps_per_entry_grade, num(prev?.aps_per_entry)),
+      mathsEntries: m?.entries ?? null,
+      mathsPct: pct(m?.entries, students),
+      mathsAStarAPct: m?.entries && m.aStarAKnown ? pct(m.aStarA, m.entries) : null,
+      furtherMathsPct: pct(m?.further, students),
     };
   };
 
-  const schools = [];
-  const index = [];
+  const byRegion = new Map(Object.values(REGION_SLUG).map((slug) => [slug, { schools: [], index: [] }]));
+  const giasByLaestab = new Map();
+
   for (const g of giasRows) {
-    if (g['GOR (name)'] !== 'London' || !g['EstablishmentStatus (name)'].startsWith('Open')) continue;
+    const region = g['GOR (name)'] === 'Wales (pseudo)' ? 'Wales' : g['GOR (name)'];
+    if (!g['EstablishmentStatus (name)'].startsWith('Open')) continue;
+    if (region === 'Wales') {
+      giasByLaestab.set(`${g['LA (code)']}${g.EstablishmentNumber.padStart(4, '0')}`, g);
+      continue;
+    }
+    const slug = REGION_SLUG[region];
+    if (!slug) continue;
     const urn = g.URN;
-    const la = Number(g['LA (code)']);
-    const borough = BOROUGH_BY_LA.get(la);
-    const kind = kindOf(g);
-    index.push({ urn, name: g.EstablishmentName, postcode: g.Postcode, kind, include: include(g) || undefined });
+    byRegion.get(slug).index.push({ urn, name: g.EstablishmentName, postcode: g.Postcode, kind: kindOf(g) });
     if (!include(g)) continue;
 
     const pos = osgbToLatLon(g.Easting, g.Northing);
-    const k4 = ks4ByUrn.get(urn);
-    const k5 = ks5ByUrn.get(urn);
-    const m = msByUrn.get(urn);
     const category = categoryOf(g);
-    const ofsted = category.endsWith('college')
-      ? `https://reports.ofsted.gov.uk/search?q=${encodeURIComponent(g.EstablishmentName)}`
-      : `https://reports.ofsted.gov.uk/provider/23/${urn}`;
+    const district = tidyDistrict(g['DistrictAdministrative (name)']) || g['LA (name)'];
     const low = g.StatutoryLowAge, high = g.StatutoryHighAge;
-
-    schools.push({
+    byRegion.get(slug).schools.push({
       urn,
       name: g.EstablishmentName,
       category,
       type: g['TypeOfEstablishment (name)'],
-      typeGroup: g['EstablishmentTypeGroup (name)'],
       ageRange: low && high ? `${low}–${high}` : null,
       hasSixthForm:
         category === '16-19' || category.endsWith('college') || g['OfficialSixthForm (name)'] === 'Has a sixth form',
@@ -282,33 +386,51 @@ async function main() {
       pupils: num(g.NumberOfPupils),
       capacity: num(g.SchoolCapacity),
       fsm: num(g.PercentageFSM),
-      la,
-      borough: borough?.name ?? g['LA (name)'],
-      payArea: borough?.pay ?? null,
+      la: g['LA (name)'],
+      district,
+      region,
+      country: 'England',
+      payArea: payAreaFor({ district, country: 'England' }),
       address: [g.Street, g.Locality, g.Address3, g.Town].filter(Boolean).join(', '),
       postcode: g.Postcode,
       website: website(g.SchoolWebsite),
       phone: g.TelephoneNum || null,
       lat: pos?.lat ?? null,
       lon: pos?.lon ?? null,
-      gcse: gcseOf(k4) || null,
-      alevel: alevelOf(k5, m),
+      gcse: gcseOf(ks4ByUrn.get(urn), ks4PrevByUrn.get(urn)) || null,
+      alevel: alevelOf(ks5ByUrn.get(urn), ks5PrevByUrn.get(urn), maths.get(urn)),
       links: {
-        performance: `https://www.compare-school-performance.service.gov.uk/school/${urn}`,
+        performance: `https://find-compare-schools-colleges.service.gov.uk/school/${urn}`,
         gias: `https://get-information-schools.service.gov.uk/Establishments/Establishment/Details/${urn}`,
-        ofsted,
+        ofsted: category.endsWith('college')
+          ? `https://reports.ofsted.gov.uk/search?q=${encodeURIComponent(g.EstablishmentName)}`
+          : `https://reports.ofsted.gov.uk/provider/23/${urn}`,
       },
     });
   }
 
+  const wales = welshSchools(await downloadWalesList(), giasByLaestab);
+  await fillMissingPositions(wales.schools);
+  byRegion.set('wales', wales);
+  log(`Wales: ${wales.schools.length} secondary and middle schools, ${wales.index.length} establishments`);
+
   // Drop empty GCSE/A level blocks so the front end can simply test truthiness.
-  for (const s of schools) {
-    if (s.gcse && Object.values(s.gcse).every((v) => v === null)) s.gcse = null;
-    if (s.alevel && s.alevel.aps === null && s.alevel.mathsPct === null) s.alevel = null;
+  for (const { schools } of byRegion.values()) {
+    for (const s of schools) {
+      if (s.gcse && Object.values(s.gcse).every((v) => v === null)) s.gcse = null;
+      if (s.alevel && s.alevel.aps === null && s.alevel.mathsPct === null) s.alevel = null;
+    }
   }
 
-  // Comparison figures: borough (LA rows), London (pupil-weighted) and England.
-  const weighted = (rows, valueKey, weightKey) => {
+  // Comparison figures: local authority, region and England, each the
+  // pupil-weighted average over state-funded schools.
+  const stateUrns = new Set();
+  const regionOf = new Map();
+  for (const [slug, { index }] of byRegion) {
+    const region = Object.keys(REGION_SLUG).find((r) => REGION_SLUG[r] === slug);
+    for (const e of index) if (e.kind === 'state' || e.kind === 'special') stateUrns.add(e.urn), regionOf.set(e.urn, region);
+  }
+  const average = (rows, valueKey, weightKey) => {
     let sum = 0, w = 0;
     for (const r of rows) {
       const v = num(r[valueKey]), n = num(r[weightKey]);
@@ -319,61 +441,59 @@ async function main() {
     }
     return w ? round(sum / w) : null;
   };
-  const londonLAs = new Set(BOROUGHS.map((b) => String(b.la)));
-  const londonKs4 = ks4Rows.filter((r) => r.RECTYPE === '1' && londonLAs.has(r.LEA));
-  const londonKs5 = ks5Rows.filter((r) => r.RECTYPE === '1' && londonLAs.has(r.LEA));
-  const eng4 = ks4Rows.find((r) => r.RECTYPE === '7');
-  const eng5 = ks5Rows.find((r) => r.RECTYPE === '7');
+  const figures = (k4, k5) => ({
+    maths4: average(k4, 'mat_94_percent', 'pupil_count'),
+    maths5: average(k4, 'mat_95_percent', 'pupil_count'),
+    alevelAps: average(k5, 'aps_per_entry', 'aps_per_entry_student_count'),
+  });
+  const group = (rows, keyOf) => {
+    const out = new Map();
+    for (const r of rows) {
+      if (!stateUrns.has(r.school_urn)) continue;
+      const k = keyOf(r);
+      if (k) out.set(k, [...(out.get(k) ?? []), r]);
+    }
+    return out;
+  };
+  const k4ByLa = group(ks4Rows, (r) => r.la_name), k5ByLa = group(ks5Rows, (r) => r.la_name);
+  const k4ByRegion = group(ks4Rows, (r) => regionOf.get(r.school_urn)), k5ByRegion = group(ks5Rows, (r) => regionOf.get(r.school_urn));
+  const las = Object.fromEntries([...k4ByLa.keys()].map((la) => [la, figures(k4ByLa.get(la), k5ByLa.get(la) ?? [])]));
+  const regions = Object.fromEntries([...k4ByRegion.keys()].map((g) => [g, figures(k4ByRegion.get(g), k5ByRegion.get(g) ?? [])]));
+  const england = figures(ks4Rows.filter((r) => stateUrns.has(r.school_urn)), ks5Rows.filter((r) => stateUrns.has(r.school_urn)));
 
-  const boroughs = {};
-  for (const b of BOROUGHS) {
-    const r4 = ks4Rows.find((r) => r.RECTYPE === '4' && r.LEA === String(b.la));
-    const r5 = ks5Rows.find((r) => r.RECTYPE === '4' && r.LEA === String(b.la));
-    boroughs[b.name] = {
-      la: b.la,
-      payArea: b.pay,
-      maths4: num(r4?.PTEBACMAT_94),
-      maths5: num(r4?.PTEBACMAT_95),
-      alevelAps: num(r5?.TALLPPE_ALEV_1618),
-      alevelGrade: r5?.TALLPPEGRD_ALEV_1618 || null,
-    };
+  await rm(OUT_DIR, { recursive: true, force: true });
+  await rm(INDEX_DIR, { recursive: true, force: true });
+  await mkdir(OUT_DIR, { recursive: true });
+  await mkdir(INDEX_DIR, { recursive: true });
+  const regionList = [];
+  for (const [region, slug] of Object.entries(REGION_SLUG)) {
+    const { schools, index } = byRegion.get(slug);
+    schools.sort((a, b) => a.name.localeCompare(b.name));
+    const placed = schools.filter((s) => s.lat != null);
+    const bbox = [
+      Math.min(...placed.map((s) => s.lat)), Math.min(...placed.map((s) => s.lon)),
+      Math.max(...placed.map((s) => s.lat)), Math.max(...placed.map((s) => s.lon)),
+    ].map((v) => round(v, 3));
+    await writeFile(join(OUT_DIR, `${slug}.json`), JSON.stringify({ region, schools }));
+    await writeFile(join(INDEX_DIR, `${slug}.json`), JSON.stringify(index));
+    regionList.push({ slug, name: region, country: region === 'Wales' ? 'Wales' : 'England', count: schools.length, bbox });
+    const withGcse = schools.filter((s) => s.gcse?.maths4 != null).length;
+    log(`${region}: ${schools.length} schools (${withGcse} with GCSE maths), ${index.length} establishments`);
   }
 
-  const londonAps = weighted(londonKs5, 'TALLPPE_ALEV_1618', 'TALLPUP_ALEV_1618');
-  const out = {
-    generated: new Date().toISOString(),
-    gcseYear: academicYear(ks4.year),
-    alevelYear: academicYear(ks5.year),
-    mathsSciYear: academicYear(ms.year),
-    averages: {
-      london: {
-        maths4: weighted(londonKs4, 'PTEBACMAT_94', 'TPUP'),
-        maths5: weighted(londonKs4, 'PTEBACMAT_95', 'TPUP'),
-        alevelAps: londonAps,
-        alevelGrade: gradeFromAps(londonAps),
-        ucasPerEntry: ucasFromAps(londonAps),
-      },
-      england: {
-        maths4: num(eng4?.PTEBACMAT_94),
-        maths5: num(eng4?.PTEBACMAT_95),
-        alevelAps: num(eng5?.TALLPPE_ALEV_1618),
-        alevelGrade: eng5?.TALLPPEGRD_ALEV_1618 || null,
-        ucasPerEntry: ucasFromAps(num(eng5?.TALLPPE_ALEV_1618)),
-      },
-    },
-    boroughs,
-    schools: schools.sort((a, b) => a.name.localeCompare(b.name)),
-  };
-
-  await mkdir(dirname(OUT), { recursive: true });
-  await writeFile(OUT, JSON.stringify(out));
-  await mkdir(dirname(INDEX_OUT), { recursive: true });
-  await writeFile(INDEX_OUT, JSON.stringify(index));
-
-  const withGcse = schools.filter((s) => s.gcse?.maths4 != null).length;
-  const withAlevel = schools.filter((s) => s.alevel?.aps != null).length;
-  log(`Wrote ${schools.length} schools (${withGcse} with GCSE maths, ${withAlevel} with A level results)`);
-  log(`Wrote ${index.length} London establishments to the matching index`);
+  await writeFile(
+    join(OUT_DIR, 'index.json'),
+    JSON.stringify({
+      generated: new Date().toISOString(),
+      gcseYear: academicYear(ks4Year),
+      gcseProvisional: ks4Provisional,
+      gcsePrevYear: ks4Prev ? academicYear(ks4Prev) : null,
+      alevelYear: academicYear(ks5Year),
+      alevelPrevYear: ks5Prev ? academicYear(ks5Prev) : null,
+      regions: regionList,
+      averages: { england, regions, las },
+    }),
+  );
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

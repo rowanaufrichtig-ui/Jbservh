@@ -10,22 +10,25 @@ export const meta = {
   key: 'mnt',
   name: 'MyNewTerm',
   home: BASE,
-  searchUrl: `${BASE}/search/category-teaching-lecturing/scategory-secondary`,
+  searchUrl: () => `${BASE}/search/category-teaching-lecturing/scategory-secondary`,
+  covers: () => true,
 };
 
 const PAGE_SIZE = 50;
 
-async function page(keyword, pageNo) {
+async function page(area, keyword, pageNo) {
   const body = new URLSearchParams({
     ajaxType: 'searched_job',
     pageNo: String(pageNo),
     pageTotal: String(PAGE_SIZE),
     searchByKeyword: keyword,
-    'searchedPostcode[lat]': '51.5072',
-    'searchedPostcode[lon]': '-0.1276',
-    'searchedPostcode[formatted]': 'London, UK',
+    'searchedPostcode[lat]': String(area.lat),
+    'searchedPostcode[lon]': String(area.lon),
+    'searchedPostcode[formatted]': `${area.board}, UK`,
     'searchedPostcode[isCountry]': '0',
-    searchedMiles: '20',
+    // A region (Greater London) is searched as a slightly larger circle and
+    // trimmed to the region afterwards.
+    searchedMiles: String(Math.round(area.region ? area.radius + 5 : area.radius)),
   });
   const res = await request(`${BASE}/includes/ajax_requests/ajax_job_calls.php`, {
     method: 'POST',
@@ -73,11 +76,11 @@ function toJob(r) {
   };
 }
 
-export async function scrape() {
+export async function scrape(area) {
   const byId = new Map();
   for (const kw of ['math', 'maths', 'mathematics']) {
     for (let p = 1, pages = 1; p <= Math.min(pages, 6); p++) {
-      const res = await page(kw, p);
+      const res = await page(area, kw, p);
       pages = res.pages;
       for (const r of res.rows) byId.set(String(r.job_ads_id), r);
       if (!res.rows.length) break;

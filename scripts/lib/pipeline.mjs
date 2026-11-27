@@ -1,25 +1,37 @@
-// The job pipeline: run every source, keep London maths roles, match each
-// advert to its school, merge duplicates and rate it for ECTs.
+// The job pipeline: run every source for an area, keep maths roles in that
+// area, match each advert to its school, merge duplicates and rate it for ECTs.
 //
 // This module has no Node-only imports so the Android app can run exactly
 // the same code on the phone (scripts/build-app-web.mjs copies it in).
 
 import * as tv from '../sources/teachingVacancies.mjs';
-import * as tes from '../sources/tes.mjs';
 import * as mnt from '../sources/myNewTerm.mjs';
 import * as eteach from '../sources/eteach.mjs';
 import { buildMatcher } from './match.mjs';
 import { lookupPostcodes, reverseGeocode } from './geo.mjs';
-import { findBorough } from './london.mjs';
+import { inArea, payAreaFor, tidyDistrict, titleNamesFarPlace } from './places.mjs';
 import { nameKey, normPostcode } from './text.mjs';
 import {
   isMaths, roleOf, ectAssessment, teachesKS5, contractOf, workingPatternOf,
-  payAreaFromText, looksPrimary, NON_LONDON_TITLE, toDate,
+  payAreaFromText, looksPrimary, toDate,
 } from './classify.mjs';
 
 // Earlier sources win when the same advert appears on several boards.
-export const SOURCES = [tv, mnt, tes, eteach];
+export const SOURCES = [tv, mnt, eteach];
 const SOURCE_NAME = Object.fromEntries(SOURCES.map((s) => [s.meta.key, s.meta.name]));
+
+// Boards we link to but do not check automatically: TES now blocks
+// automated requests with a browser challenge.
+export function searchLinks(area) {
+  const mi = Math.round(area.region ? area.radius + 5 : area.radius);
+  return [
+    ...SOURCES.filter((s) => s.meta.covers(area)).map((s) => ({ name: s.meta.name, url: s.meta.searchUrl(area) })),
+    {
+      name: 'TES Jobs',
+      url: `https://www.tes.com/jobs/search?subjects=Mathematics&displayLocation=${encodeURIComponent(area.board)}&lat=${area.lat}&lon=${area.lon}&distance=${mi}&distanceUnit=mi`,
+    },
+  ];
+}
 
 const titleKey = (t) =>
   t.toLowerCase()
@@ -33,14 +45,15 @@ function summary(text = '') {
   return `${clean.slice(0, 320).replace(/\s\S*$/, '')}…`;
 }
 
-async function collect(log, onProgress) {
+async function collect(area, log, onProgress) {
   const raw = [];
   const status = [];
-  for (const [i, src] of SOURCES.entries()) {
-    onProgress?.({ step: i + 1, total: SOURCES.length, source: src.meta.name });
+  const sources = SOURCES.filter((s) => s.meta.covers(area));
+  for (const [i, src] of sources.entries()) {
+    onProgress?.({ step: i + 1, total: sources.length, source: src.meta.name });
     const t = Date.now();
     try {
-      const jobs = await src.scrape();
+      const jobs = await src.scrape(area);
       raw.push(...jobs);
       status.push({ ...src.meta, ok: true, found: jobs.length, seconds: Math.round((Date.now() - t) / 1000) });
       log(`${src.meta.name}: ${jobs.length} adverts`);
@@ -54,16 +67,17 @@ async function collect(log, onProgress) {
 
 /**
  * @param {object} opts
- * @param {Array} opts.schools        schools.json `schools`
- * @param {Array} opts.establishments london-establishments.json
- * @param {object} [opts.previous]    last jobs.json, to cover a board that fails
+ * @param {object} opts.area          { name, lat, lon, radius (miles), board, country, region? }
+ * @param {Array} opts.schools        schools of the regions the area touches
+ * @param {Array} opts.establishments every school in those regions, for matching
+ * @param {object} [opts.previous]    the area's last results, to cover a board that fails
  * @param {Function} [opts.log]
  * @param {Function} [opts.onProgress] called with { step, total, source }
- * @returns jobs.json contents
+ * @returns the area's jobs file
  */
-export async function buildJobsData({ schools, establishments, previous = { jobs: [] }, log = () => {}, onProgress }) {
+export async function buildJobsData({ area, schools, establishments, previous = { jobs: [] }, log = () => {}, onProgress }) {
   const match = buildMatcher(establishments, schools);
-  const { raw, status } = await collect(log, onProgress);
+  const { raw, status } = await collect(area, log, onProgress);
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
 
@@ -79,7 +93,7 @@ export async function buildJobsData({ schools, establishments, previous = { jobs
   needReverse.forEach((j, i) => reversed[i] && (j._place = reversed[i]));
 
   const jobs = [];
-  const dropped = { notMaths: 0, notLondon: 0, expired: 0 };
+  const dropped = { notMaths: 0, outsideArea: 0, expired: 0 };
   for (const j of raw) {
     if (!isMaths(j)) {
       dropped.notMaths++;
@@ -92,18 +106,20 @@ export async function buildJobsData({ schools, establishments, previous = { jobs
     }
     const place = places.get(j.postcode) ?? j._place ?? null;
     const { establishment, school } = match(j);
-    const inLondon = place
-      ? place.region === 'London'
-      : school
-        ? true
-        : j.region === 'London' || /greater london/i.test(j.county ?? '') || /\blondon\b/i.test(j.address ?? '');
-    if (!inLondon || NON_LONDON_TITLE.test(j.title)) {
-      dropped.notLondon++;
+    // Where is it? The matched school is the best guide, then the advert's
+    // postcode, then coordinates the board gave.
+    const where = school ?? place ?? (j.lat != null ? { lat: j.lat, lon: j.lon } : null);
+    const inside = where
+      ? inArea(area, { lat: where.lat, lon: where.lon, region: where.region })
+      : `${j.address ?? ''} ${j.county ?? ''}`.toLowerCase().includes(area.board.toLowerCase());
+    if (!inside || titleNamesFarPlace(j.title, area)) {
+      dropped.outsideArea++;
       continue;
     }
 
     const role = roleOf(j.title);
-    const borough = findBorough(school?.borough ?? place?.borough ?? j.borough);
+    const district = tidyDistrict(school?.district ?? place?.district) ?? null;
+    const country = school?.country ?? place?.country ?? area.country;
     let sector = j.funding === 'agency' ? 'agency' : (establishment?.kind ?? j.funding ?? null);
     if (!establishment && looksPrimary(j) && sector !== 'independent') sector = 'primary';
     if (sector === 'state' && !school && /trust|federation|schools\b|partnership|group/i.test(j.employer)) sector = 'trust';
@@ -120,8 +136,9 @@ export async function buildJobsData({ schools, establishments, previous = { jobs
       sixthForm: Boolean(school?.hasSixthForm || category === '16-19' || category?.endsWith('college')),
       ks5: teachesKS5(j),
       role,
-      borough: borough?.name ?? place?.borough ?? j.borough ?? null,
-      payArea: payAreaFromText(j.salary) ?? borough?.pay ?? null,
+      district,
+      country,
+      payArea: payAreaFromText(j.salary) ?? payAreaFor({ district, country }),
       postcode: j.postcode ?? place?.postcode ?? null,
       lat: school?.lat ?? place?.lat ?? j.lat ?? null,
       lon: school?.lon ?? place?.lon ?? j.lon ?? null,
@@ -182,7 +199,9 @@ export async function buildJobsData({ schools, establishments, previous = { jobs
 
   return {
     generated: now.toISOString(),
-    sources: status.map(({ key, name, home, searchUrl, ok, found, error }) => ({ key, name, home, searchUrl, ok, found, error })),
+    area,
+    sources: status.map(({ key, name, home, note, ok, found, error }) => ({ key, name, home, note, ok, found, error })),
+    links: searchLinks(area),
     dropped,
     jobs: out,
   };

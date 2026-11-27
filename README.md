@@ -1,58 +1,80 @@
-# Square One: London maths teaching jobs for ECTs
+# Square One: maths teaching jobs for ECTs
 
-A website that gathers **maths teaching jobs in London** from the main school
-job boards, highlights the ones that suit **early career teachers (ECTs)**,
-focuses on **state schools and sixth forms**, and puts every school on a
-**map with its GCSE maths and A level results**.
+A website (plus Android and Mac apps) that gathers **maths teaching jobs** from
+the main school job boards for an area you choose, highlights the ones that
+suit **early career teachers (ECTs)**, focuses on **state schools and sixth
+forms**, and puts every school on a **map with its GCSE maths and A level
+results**.
 
 ![Jobs, map and school profile](docs/screenshot.png)
+
+## Areas
+
+Pick an area with the **Area · Change** button at the top.
+
+- **On the website:** London (all of Greater London), Brighton & Hove, Cardiff,
+  Bristol, Birmingham and Manchester (each within 10 miles). These are checked
+  twice a day by the GitHub Action. Link to one with `?area=cardiff`.
+- **In the Android and Mac apps:** any town, city or postcode in England or
+  Wales, within 5, 10, 15 or 25 miles. The apps check the job boards
+  themselves, so any place works.
+
+To add a preset area for the website, add it to `PRESETS` in
+`scripts/lib/places.mjs`.
 
 ## What it does
 
 **Jobs tab**
 
-- Collects London maths adverts from four boards:
-  [Teaching Vacancies (GOV.UK)](https://teaching-vacancies.service.gov.uk),
-  [TES](https://www.tes.com/jobs), [MyNewTerm](https://mynewterm.com) and
-  [Eteach](https://www.eteach.com).
+- Collects maths adverts for the area from
+  [Teaching Vacancies (GOV.UK)](https://teaching-vacancies.service.gov.uk)
+  (England only), [MyNewTerm](https://mynewterm.com) and
+  [Eteach](https://www.eteach.com). [TES](https://www.tes.com/jobs) now blocks
+  automated searches, so the site links to a TES search for the area instead.
 - Merges the same advert when it appears on several boards and links to each.
 - Rates every job for ECTs:
-  - **Suitable for ECTs**: a board marks it ECT-suitable, or the advert mentions ECTs/NQTs.
+  - **Suitable for ECTs**: a board marks it ECT-suitable, or the advert mentions ECTs or NQTs.
   - **Likely open to ECTs**: a classroom teacher post with no sign it needs experience.
   - **Not aimed at ECTs**: leadership/TLR roles, “minimum 3 years’ experience”, or “not suitable for ECTs”.
   - **Teacher training route**: trainee and salaried training posts.
 - Picks out mentoring, induction/ECF, CPD and reduced-timetable mentions.
-- Matches each advert to its school using the DfE school register, so it can tell
-  state schools from independent, special and alternative provision schools,
-  and show the school’s results on the job card.
+- Matches each advert to its school using the school registers for England and
+  Wales, so it can tell state schools from independent, special and alternative
+  provision schools, and show the school’s results on the job card.
 - Filters: ECT suitability, school type (state is the default), sixth form or
-  A level teaching, role, borough, Inner/Outer London pay area and contract.
+  A level teaching, role, district, pay area and contract.
 
 **Schools map tab**
 
-- All 540 open state-funded secondary, all-through and 16–19 schools, sixth form
-  colleges and FE colleges in the 33 London boroughs.
+- Every open state-funded secondary, all-through and 16–19 school, sixth form
+  college and FE college in England (3,685), and every maintained secondary and
+  middle school in Wales (204). The area searched is outlined on the map.
 - Colour schools by **GCSE maths grade 4+**, **grade 5+**, or **A level average
   grade / UCAS points**. Schools with a maths job open now have a red ring.
-- Each school’s profile shows:
-  - GCSE maths 4+ and 5+ (and English and maths 4+), compared with the borough,
-    London and England.
-  - A level average grade, **UCAS tariff points per A level and for three A levels**,
-    the share of A level students taking maths and further maths, AAB+ rate and value added.
+- Each English school’s profile shows:
+  - GCSE maths 4+ and 5+ (and English and maths 4+), the change on last year,
+    and comparisons with its council area, its region and England.
+  - A level average grade, **UCAS tariff points per A level and for the best
+    three A levels**, the share of A level students taking maths and further
+    maths, how many maths entries got A* or A, AAB+ rate and progress band.
   - Sixth form, selective/faith/single-sex status, trust, size, free school meals,
-    pay area with the 2026/27 M1 salary, and links to the DfE performance tables,
+    pay area with the 2026/27 M1 salary, and links to the DfE school profile,
     Ofsted reports and the school website.
+- Welsh schools show whether they are Welsh-medium, English-medium or dual
+  stream, and link to My Local School and Estyn. Wales does not publish exam
+  results school by school, so they have no GCSE or A level figures.
 
-**ECT guide tab**: induction entitlements, 2026/27 London starting pay, how to
-read an advert, interview questions, and how the school figures are worked out.
+**ECT guide tab**: induction in England and Wales, 2026/27 starting pay for every
+English pay area (from the official 2026 pay document), how to read an advert,
+interview questions, and how the school figures are worked out.
 
 ### How UCAS points are worked out
 
 The DfE publishes an average point score per A level entry on its own scale
 (A* = 60, A = 50 … E = 10). UCAS tariff points (A* = 56, A = 48 … E = 16) are a
 straight-line transformation of that scale, `tariff = 0.8 × points + 8`, so the
-average converts exactly. “≈ for three A levels” is three times the per-entry
-figure.
+average converts exactly. “For best three” applies the same conversion to the
+DfE’s average of each student’s best three A levels.
 
 ## Running it
 
@@ -67,13 +89,15 @@ The repository already contains the data in `public/data/`, so the site works
 straight away. To refresh it:
 
 ```bash
-npm run jobs         # re-check the job boards (about 30 seconds)
-npm run schools      # re-download the school register and DfE results (about 1 minute, ~90 MB)
+npm run jobs         # re-check the job boards for every preset area (a few minutes)
+npm run jobs -- --area cardiff   # just one area
+npm run schools      # re-download the school registers and DfE results (~350 MB)
 npm test             # unit tests for the parsers and classification rules
 ```
 
 When the site is served by `npm start`, the Sources tab also has a
-**Check the job boards now** button (limited to once every 10 minutes).
+**Check the job boards now** button for the chosen area (limited to once
+every 10 minutes per area).
 
 ## Android app
 
@@ -83,10 +107,12 @@ from the phone**, so it stays current without any server or GitHub Pages
 setup.
 
 - It opens instantly with the jobs it last found (or the ones it shipped with).
-- When those are more than 6 hours old it checks Teaching Vacancies, TES,
+- It can search any town, city or postcode in England or Wales, not just the
+  website's preset areas.
+- When the jobs are more than 6 hours old it checks Teaching Vacancies,
   MyNewTerm and Eteach in the background (skipped when offline or in data saver
   mode). **Check now** on the Jobs tab does it on demand. Each check takes
-  about 30 seconds and uses roughly 15 MB of data, mostly TES job pages.
+  under a minute and uses a few megabytes of data.
 - The map, school profiles and ECT guide work the same as on the website.
   School results are bundled, so they only change with a new version of the app.
 
@@ -171,16 +197,18 @@ The site will then be at `https://<your-user>.github.io/<repo>/`.
 ```
 public/                 the website (plain HTML, CSS and JavaScript)
   index.html, styles.css, app.js
-  data/jobs.json        built by scripts/scrape-jobs.mjs
-  data/schools.json     built by scripts/build-schools.mjs
+  data/areas.json       the preset areas and when each was last checked
+  data/jobs/<area>.json built by scripts/scrape-jobs.mjs
+  data/schools/         built by scripts/build-schools.mjs, one file per region
   vendor/leaflet/       map library (BSD-2-Clause)
 scripts/
-  build-schools.mjs     GIAS register + DfE KS4, 16-18 and A level maths data
-  scrape-jobs.mjs       runs the sources, classifies, matches and merges jobs
+  build-schools.mjs     school registers (England and Wales) + DfE results
+  scrape-jobs.mjs       runs the job pipeline for each preset area
   sources/              one module per job board
-  lib/                  CSV/zip/xlsx readers, grid-to-lat/long, matching, rules
-  data/london-establishments.json   every London school, for matching adverts
-  lib/pipeline.mjs      the shared job pipeline (Node and the Android app)
+  lib/places.mjs        preset areas, distances, pay areas
+  lib/pipeline.mjs      the shared job pipeline (Node and both apps)
+  lib/                  CSV/zip/ods readers, grid-to-lat/long, matching, rules
+  data/establishments/  every school in each region, for matching adverts
   build-app-web.mjs     assembles app-web/ for the Android app
   make-app-icons.py     draws the app icon and splash screens
 server.mjs              local static server with a refresh endpoint
@@ -195,9 +223,13 @@ the previous run and marks them on the Sources tab.
 
 ## Data and good manners
 
-- School data: [Get Information About Schools](https://get-information-schools.service.gov.uk)
-  and the [DfE school and college performance tables](https://www.compare-school-performance.service.gov.uk/download-data),
-  2024/25, © Crown copyright, [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
+- School data: [Get Information About Schools](https://get-information-schools.service.gov.uk),
+  the Welsh Government's [list of schools](https://www.gov.wales/address-list-schools),
+  and DfE school-level results on [Explore Education Statistics](https://explore-education-statistics.service.gov.uk)
+  (GCSE 2025/26 provisional, A level 2024/25), © Crown copyright,
+  [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
+  The three DfE data set IDs are in `scripts/build-schools.mjs`; update them when
+  next year's results are published.
 - Postcode lookups: [postcodes.io](https://postcodes.io) (open data).
 - Map: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.
 - Job adverts belong to the boards and schools that published them. The scraper
@@ -206,4 +238,6 @@ the previous run and marks them on the Sources tab.
   site’s terms before running it more often or reusing the data elsewhere.
 - Progress 8 is not published for 2025 or 2026 (no KS2 baseline for those
   cohorts), so it is not shown.
-- Pay figures are the 2026/27 M1 points (3.5% award). Academies can set their own pay.
+- Pay figures are the 2026/27 M1 points from the School Teachers' Pay and
+  Conditions Document 2026. Academies can set their own pay. Wales has its own
+  pay document.

@@ -8,7 +8,7 @@ export const isMaths = (job) =>
 const ROLE_RULES = [
   ['speculative', /speculative|expression of interest|talent pool|register (your )?interest|general application|future vacanc/i],
   ['trainee', /trainee|train to (become|teach)|teacher training|salaried|scitt|pgce|initial teacher|unqualified teacher|graduate teach(er|ing)|apprentice/i],
-  ['leadership', /head of|\bhod\b|director|lead practitioner|leader|\blead\b|second in (charge|department)|\b2ic\b|deputy|assistant (head|principal)|vice principal|co-?ordinator|principal\b|curriculum manager|faculty/i],
+  ['leadership', /head of|\bhod\b|director|lead practitioner|leader|\blead\b|\bsecond in\b|\b2nd in\b|\b2ic\b|deputy|assistant (head|principal)|vice principal|co-?ordinator|principal\b|curriculum manager|faculty/i],
   ['support', /teaching assistant|\bta\b|\bhlta\b|learning support|cover supervisor|instructor|technician|learning mentor|graduate tutor|intervention|invigilat|academic mentor/i],
   ['tutor', /\btutors?\b/i],
   ['teacher', /teacher|teaching|lecturer|educator|\bmaths\b|mathematics/i],
@@ -98,8 +98,6 @@ export function payAreaFromText(s = '') {
 const PRIMARY = /\bprimary\b|\bprep(aratory)?\b|\binfant|\bjunior\b|\bKS1\b|\bKS2\b|key stage [12]\b|\bEYFS\b|nursery/i;
 export const looksPrimary = (job) => PRIMARY.test(`${job.title} ${job.phase ?? ''}`) && !/secondary|KS3|KS4|all[- ]through/i.test(`${job.title} ${job.phase ?? ''}`);
 
-// Places outside London that turn up in "London" searches.
-export const NON_LONDON_TITLE = /\b(Manchester|Oldham|Birmingham|Leeds|Liverpool|Bristol|Sheffield|Nottingham|Leicester|Hertfordshire|Berkshire|Slough|Watford|Luton|Milton Keynes|Brighton|Dubai|Abu Dhabi|Morocco|China|Spain)\b/i;
 
 export function toDate(v) {
   if (!v) return null;

@@ -1,5 +1,6 @@
-// Square One front end: loads data/jobs.json and data/schools.json, renders
-// the filterable job list, the schools map and the per-school profile.
+// Square One front end: loads the chosen area's jobs and the schools of the
+// regions it touches, renders the filterable job list, the schools map and
+// the per-school profile.
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -22,7 +23,9 @@ const store = {
   },
 };
 
-const M1 = { 'Inner London': 41729, 'Outer London': 39196, Fringe: 35602 };
+// Starting salaries from September 2026 (School Teachers' Pay and Conditions
+// Document 2026). Wales has its own pay document.
+const M1 = { 'Inner London': 41729, 'Outer London': 39196, Fringe: 35602, 'Rest of England': 34069 };
 
 // Ordinal blue ramps for map markers, low -> high. Validated against the
 // light (#fafaf8) and dark (#262626) basemaps; on dark, higher = lighter.
@@ -51,7 +54,7 @@ const METRICS = {
     short: (v) => `${v.toFixed(0)}%`,
     bins: [60, 70, 80, 90],
     labels: ['under 60%', '60–69%', '70–79%', '80–89%', '90%+'],
-    none: 'No GCSE results (16–19 or new school)',
+    none: 'No GCSE results published',
   },
   maths5: {
     title: 'GCSE maths, grade 5 or above',
@@ -60,7 +63,7 @@ const METRICS = {
     short: (v) => `${v.toFixed(0)}%`,
     bins: [40, 55, 70, 85],
     labels: ['under 40%', '40–54%', '55–69%', '70–84%', '85%+'],
-    none: 'No GCSE results (16–19 or new school)',
+    none: 'No GCSE results published',
   },
   alevel: {
     title: 'A level average grade · UCAS points per A level',
@@ -69,7 +72,7 @@ const METRICS = {
     short: (v) => minus(gradeFromAps(v)),
     bins: [31.67, 35, 38.33, 45],
     labels: ['C or below · <33', 'C+ · 33–36', 'B− · 36–39', 'B, B+ · 39–44', 'A− or above · 44+'],
-    none: 'No A level results',
+    none: 'No A level results published',
   },
 };
 const binOf = (bins, v) => bins.filter((b) => v >= b).length;
@@ -94,19 +97,48 @@ const ECT_PILL = {
   training: ['ect-training', ICON.cap, 'Teacher training route'],
 };
 
+// Inside the apps the page can check the job boards itself: on Android by
+// running the pipeline here over Capacitor's native HTTP, on the desktop by
+// asking Electron's main process to run it. Only the apps can search places
+// other than the presets.
+const NATIVE = Boolean(window.Capacitor?.isNativePlatform?.());
+const DESKTOP = window.squareOneDesktop ?? null;
+const IN_APP = NATIVE || Boolean(DESKTOP);
+const AUTO_REFRESH_HOURS = 6;
+
 const state = {
+  area: null,
+  presets: {},
+  index: null, // schools/index.json
+  regionCache: new Map(),
+  regions: [], // region entries loaded for the area
+  schools: [], // schools in the loaded regions
+  areaSchools: [], // ... of which inside the area
+  schoolByUrn: new Map(),
   jobs: [],
   sources: [],
+  links: [],
   generated: null,
-  schools: [],
-  schoolsMeta: null,
-  schoolByUrn: new Map(),
   jobsByUrn: new Map(),
 };
 
-const DEFAULT_FILTERS = { q: '', ect: 'friendly', sector: ['state'], phase: 'any', role: ['teacher', 'trainee', 'speculative'], borough: '', pay: '', contract: '', sort: 'closing' };
+const DEFAULT_FILTERS = { q: '', ect: 'friendly', sector: ['state'], phase: 'any', role: ['teacher', 'trainee', 'speculative'], district: '', pay: '', contract: '', sort: 'closing' };
 let filters = { ...DEFAULT_FILTERS, ...store.get('sq1-filters', {}) };
 if (!Array.isArray(filters.sector) || !Array.isArray(filters.role)) filters = { ...DEFAULT_FILTERS };
+
+// ---------- places ----------
+function miles(aLat, aLon, bLat, bLon) {
+  const r = Math.PI / 180;
+  const h = Math.sin(((bLat - aLat) * r) / 2) ** 2 + Math.cos(aLat * r) * Math.cos(bLat * r) * Math.sin(((bLon - aLon) * r) / 2) ** 2;
+  return 3958.8 * 2 * Math.asin(Math.sqrt(h));
+}
+const inArea = (area, s) => (area.region ? s.region === area.region : s.lat != null && miles(area.lat, area.lon, s.lat, s.lon) <= area.radius);
+function regionsForArea(area, regions) {
+  if (area.region) return regions.filter((r) => r.name === area.region);
+  const dLat = area.radius / 69, dLon = area.radius / (69 * Math.cos((area.lat * Math.PI) / 180));
+  return regions.filter(({ bbox: [s, w, n, e] }) => area.lat + dLat >= s && area.lat - dLat <= n && area.lon + dLon >= w && area.lon - dLon <= e);
+}
+const areaLabel = (a) => (a.region ? a.name : `${a.name} · ${a.radius} miles`);
 
 // ---------- theme ----------
 const isDark = () => {
@@ -129,6 +161,7 @@ function setupTheme() {
 function onThemeChange() {
   if (map) {
     drawMarkers();
+    drawAreaOutline();
     renderLegend();
   }
 }
@@ -136,6 +169,7 @@ function onThemeChange() {
 // ---------- dates ----------
 const dayFmt = new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'Europe/London' });
 const stampFmt = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });
+const stamp = (iso) => (iso ? stampFmt.format(new Date(iso)) : 'not yet');
 function closingInfo(iso) {
   if (!iso) return { text: 'No closing date given', soon: false };
   const d = new Date(iso);
@@ -165,11 +199,11 @@ function jobMatches(job) {
   if (!filters.sector.includes(SECTOR_GROUP[job.sector] ?? 'other')) return false;
   if (filters.phase === 'sixthform' && !job.sixthForm) return false;
   if (filters.phase === 'ks5' && !job.ks5) return false;
-  if (filters.borough && job.borough !== filters.borough) return false;
+  if (filters.district && job.district !== filters.district) return false;
   if (filters.pay && job.payArea !== filters.pay) return false;
   if (filters.contract && job.contract !== filters.contract) return false;
   if (filters.q) {
-    const hay = [job.title, job.employer, job.school, job.borough, job.trust, job.postcode, job.summary].join(' ').toLowerCase();
+    const hay = [job.title, job.employer, job.school, job.district, job.trust, job.postcode, job.summary].join(' ').toLowerCase();
     if (!filters.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false;
   }
   return true;
@@ -194,10 +228,11 @@ function snapshot(job) {
       ? `<div class="snapshot none">Trust-wide role. Check the advert for which school${job.trust ? ` in ${esc(job.trust)}` : ''} you would work in.</div>`
       : '';
   }
-  const b = state.schoolsMeta.boroughs[s.borough];
+  const la = state.index.averages.las[s.la];
   const stats = [];
+  if (s.language) stats.push(`<div class="stat"><b>${esc(s.language.split(' ')[0])}</b><span>${s.language.includes('Dual') ? 'Welsh and English' : 'teaching language'}</span></div>`);
   if (s.gcse?.maths4 != null) {
-    stats.push(`<div class="stat"><b>${pct(s.gcse.maths4)}</b><span>GCSE maths 4+${b?.maths4 != null ? ` · borough ${pct(b.maths4)}` : ''}</span></div>`);
+    stats.push(`<div class="stat"><b>${pct(s.gcse.maths4)}</b><span>GCSE maths 4+${la?.maths4 != null ? ` · ${esc(s.la)} ${pct(la.maths4)}` : ''}</span></div>`);
   }
   if (s.alevel?.aps != null) {
     stats.push(`<div class="stat"><b>${minus(s.alevel.grade ?? gradeFromAps(s.alevel.aps))}</b><span>A level average · ≈${s.alevel.ucas3} UCAS for 3</span></div>`);
@@ -205,6 +240,7 @@ function snapshot(job) {
   if (s.alevel?.mathsPct != null) stats.push(`<div class="stat"><b>${pct(s.alevel.mathsPct)}</b><span>of A level students take maths</span></div>`);
   if (!s.hasSixthForm) stats.push(`<div class="stat"><b>11–16</b><span>no sixth form</span></div>`);
   if (s.fsm != null) stats.push(`<div class="stat"><b>${pct(s.fsm)}</b><span>free school meals</span></div>`);
+  if (s.country === 'Wales') stats.push(`<div class="stat"><b>Wales</b><span>results not published by school</span></div>`);
   return `<div class="snapshot">${stats.join('')}<a class="button ghost" href="#school-${s.urn}">School profile &amp; map</a></div>`;
 }
 
@@ -226,7 +262,8 @@ function jobCard(job) {
     job.start && ['Starts', esc(startText(job.start))],
   ].filter(Boolean);
 
-  const where = [job.borough, job.payArea && `${job.payArea} pay`].filter(Boolean).map(esc).join(' · ');
+  const payNote = job.payArea === 'Wales' ? 'Welsh pay scales' : job.payArea && `${job.payArea} pay`;
+  const where = [job.district, payNote].filter(Boolean).map(esc).join(' · ');
   const reasons = (job.ectReasons ?? []).map((r) => `<li>${esc(r)}</li>`).join('');
   const signals = (job.ectSignals ?? []).map((s) => `<span class="tag">${esc(s)}</span>`).join(' ');
   const links = job.sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>`).join('');
@@ -250,8 +287,12 @@ function jobCard(job) {
 function renderJobs() {
   const list = state.jobs.filter(jobMatches).sort(SORTS[filters.sort] ?? SORTS.closing);
   $('#job-list').innerHTML = list.map(jobCard).join('');
-  $('#jobs-empty').hidden = list.length > 0;
-  $('#results-count').innerHTML = `<strong>${list.length}</strong> of ${state.jobs.length} jobs match`;
+  $('#jobs-empty').hidden = list.length > 0 || !state.generated;
+  $('#results-count').innerHTML = state.generated
+    ? `<strong>${list.length}</strong> of ${state.jobs.length} jobs match`
+    : IN_APP
+      ? 'No jobs checked here yet.'
+      : 'Jobs for this area have not been collected yet.';
 }
 
 function readFilters() {
@@ -261,7 +302,7 @@ function readFilters() {
     sector: $$('input[name="f-sector"]:checked').map((i) => i.value),
     phase: $('input[name="f-phase"]:checked').value,
     role: $$('input[name="f-role"]:checked').map((i) => i.value),
-    borough: $('#f-borough').value,
+    district: $('#f-district').value,
     pay: $('#f-pay').value,
     contract: $('#f-contract').value,
     sort: $('#f-sort').value,
@@ -276,17 +317,26 @@ function writeFilters() {
   $$('input[name="f-sector"]').forEach((i) => (i.checked = filters.sector.includes(i.value)));
   $$('input[name="f-phase"]').forEach((i) => (i.checked = i.value === filters.phase));
   $$('input[name="f-role"]').forEach((i) => (i.checked = filters.role.includes(i.value)));
-  $('#f-borough').value = filters.borough;
+  $('#f-district').value = filters.district;
   $('#f-pay').value = filters.pay;
   $('#f-contract').value = filters.contract;
   $('#f-sort').value = filters.sort;
 }
 
+// District and pay-area choices depend on the area.
+function fillAreaFilters() {
+  const districts = [...new Set([...state.areaSchools.map((s) => s.district), ...state.jobs.map((j) => j.district)].filter(Boolean))].sort();
+  const all = `<option value="">All of ${esc(state.area.name)}</option>`;
+  const opts = districts.map((d) => `<option>${esc(d)}</option>`).join('');
+  $('#f-district').innerHTML = all + opts;
+  $('#m-district').innerHTML = all + opts;
+  const pays = ['Inner London', 'Outer London', 'Fringe', 'Rest of England', 'Wales'].filter((p) => state.jobs.some((j) => j.payArea === p) || state.areaSchools.some((s) => s.payArea === p));
+  $('#f-pay').innerHTML = `<option value="">Any</option>${pays.map((p) => `<option>${p}</option>`).join('')}`;
+  if (!districts.includes(filters.district)) filters.district = '';
+  if (!pays.includes(filters.pay)) filters.pay = '';
+}
+
 function setupFilters() {
-  const boroughs = [...new Set(state.schools.map((s) => s.borough))].sort();
-  for (const sel of ['#f-borough', '#m-borough']) {
-    $(sel).insertAdjacentHTML('beforeend', boroughs.map((b) => `<option>${esc(b)}</option>`).join(''));
-  }
   writeFilters();
   $('#filters-body').addEventListener('input', readFilters);
   $('#filters-body').addEventListener('change', readFilters);
@@ -306,10 +356,10 @@ function setupFilters() {
 }
 
 // ---------- map ----------
-let map, tiles, markerLayer, renderer;
+let map, tiles, markerLayer, renderer, areaOutline;
 const markers = new Map();
 let selectedUrn = null;
-const mapState = { metric: 'maths4', kind: 'all', borough: '', q: '' };
+const mapState = { metric: 'maths4', kind: 'all', district: '', q: '' };
 
 function visibleSchools() {
   const q = mapState.q.toLowerCase();
@@ -317,7 +367,8 @@ function visibleSchools() {
     if (mapState.kind === 'sixthform' && !s.hasSixthForm) return false;
     if (mapState.kind === 'post16' && !['16-19', 'sixth-form-college'].includes(s.category)) return false;
     if (mapState.kind === 'vacancies' && !state.jobsByUrn.has(s.urn)) return false;
-    if (mapState.borough && s.borough !== mapState.borough) return false;
+    if (mapState.kind === 'welsh' && s.language !== 'Welsh-medium' && !s.language?.startsWith('Dual')) return false;
+    if (mapState.district && s.district !== mapState.district) return false;
     if (q && !`${s.name} ${s.postcode} ${s.trust ?? ''}`.toLowerCase().includes(q)) return false;
     return true;
   });
@@ -354,10 +405,12 @@ function tipFor(s) {
   const m = METRICS[mapState.metric];
   const v = m.value(s);
   const jobs = state.jobsByUrn.get(s.urn)?.length ?? 0;
-  return `<b>${esc(s.name)}</b>${v == null ? esc(m.none) : esc(m.text(v))}${jobs ? `<br>${jobs} maths job${jobs > 1 ? 's' : ''} open` : ''}`;
+  const none = s.country === 'Wales' ? 'Wales does not publish school results' : m.none;
+  return `<b>${esc(s.name)}</b>${v == null ? esc(none) : esc(m.text(v))}${s.language ? `<br>${esc(s.language)}` : ''}${jobs ? `<br>${jobs} maths job${jobs > 1 ? 's' : ''} open` : ''}`;
 }
 
 function drawMarkers() {
+  if (!map) return;
   markerLayer.clearLayers();
   markers.clear();
   // Schools with open jobs go on top so their rings are never hidden.
@@ -373,15 +426,42 @@ function drawMarkers() {
   renderSchoolList();
 }
 
+// A dashed ring shows the area searched (not drawn for region-wide areas).
+function drawAreaOutline() {
+  if (!map) return;
+  areaOutline?.remove();
+  areaOutline = null;
+  if (state.area.region) return;
+  areaOutline = L.circle([state.area.lat, state.area.lon], {
+    radius: state.area.radius * 1609.34,
+    color: cssVar('--accent'),
+    weight: 2,
+    dashArray: '6 6',
+    fill: false,
+    interactive: false,
+  }).addTo(map);
+}
+
+function fitArea() {
+  if (!map) return;
+  if (state.area.region) {
+    const pts = state.areaSchools.filter((s) => s.lat != null).map((s) => [s.lat, s.lon]);
+    if (pts.length) map.fitBounds(pts, { padding: [20, 20] });
+  } else {
+    map.fitBounds(L.latLng(state.area.lat, state.area.lon).toBounds(state.area.radius * 1609.34 * 2), { padding: [10, 10] });
+  }
+}
+
 function renderLegend() {
   const m = METRICS[mapState.metric];
   const ramp = RAMP[isDark() ? 'dark' : 'light'];
+  const wales = state.schools.some((s) => s.country === 'Wales');
   $('#legend').innerHTML = `
     <div class="legend-title">${esc(m.title)}</div>
     <div class="legend-steps">${m.labels.map((l, i) => `<span class="legend-step"><span class="dot" style="background:${ramp[i]}"></span>${esc(l)}</span>`).join('')}</div>
     <div class="legend-steps">
       <span class="legend-step"><span class="dot ring"></span>Maths job open now</span>
-      <span class="legend-step"><span class="dot nodata"></span>${esc(m.none)}</span>
+      <span class="legend-step"><span class="dot nodata"></span>${esc(m.none)}${wales ? ' (and all Welsh schools)' : ''}</span>
     </div>`;
 }
 
@@ -389,15 +469,16 @@ function renderSchoolList() {
   if (!map) return;
   const m = METRICS[mapState.metric];
   const bounds = map.getBounds();
-  const inView = visibleSchools().filter((s) => s.lat != null && bounds.contains([s.lat, s.lon]));
+  // The map shows neighbouring schools for context; the list keeps to the area.
+  const inView = visibleSchools().filter((s) => s.lat != null && inArea(state.area, s) && bounds.contains([s.lat, s.lon]));
   inView.sort((a, b) => (m.value(b) ?? -1) - (m.value(a) ?? -1));
   const what = mapState.metric === 'alevel' ? 'best A level results first' : 'best GCSE maths first';
-  $('#school-count').textContent = `${inView.length} school${inView.length === 1 ? '' : 's'} in this view, ${what}`;
+  $('#school-count').textContent = `${inView.length} school${inView.length === 1 ? '' : 's'} in ${state.area.name} in this view, ${what}`;
   $('#school-list').innerHTML = inView
     .map((s) => {
       const v = m.value(s);
       const jobs = state.jobsByUrn.get(s.urn)?.length ?? 0;
-      const meta = [s.borough, CATEGORY_LABEL[s.category], s.hasSixthForm && s.category !== '16-19' && !s.category.endsWith('college') ? 'sixth form' : null]
+      const meta = [s.district, CATEGORY_LABEL[s.category], s.hasSixthForm && s.category !== '16-19' && !s.category.endsWith('college') ? 'sixth form' : null, s.language]
         .filter(Boolean)
         .join(' · ');
       return `<li><button type="button" data-urn="${s.urn}">
@@ -423,21 +504,24 @@ function cmpRows(rows, max, fmt) {
 }
 
 function schoolDetail(s) {
-  const meta = state.schoolsMeta;
-  const b = meta.boroughs[s.borough] ?? {};
-  const lon = meta.averages.london, eng = meta.averages.england;
+  const meta = state.index;
+  const la = meta.averages.las[s.la] ?? {};
+  const region = meta.averages.regions[s.region] ?? {};
+  const eng = meta.averages.england;
   const tags = [
-    s.hasSixthForm ? (s.category === 'secondary' || s.category === 'all-through' ? 'Has a sixth form' : 'Post-16 only') : 'No sixth form (11–16)',
+    s.hasSixthForm ? (s.category === 'secondary' || s.category === 'all-through' ? 'Has a sixth form' : 'Post-16 only') : 'No sixth form',
+    s.language,
     s.admissions === 'Selective' && 'Selective (grammar)',
     s.gender && s.gender !== 'Mixed' && `${s.gender} only`,
     s.religion,
   ].filter(Boolean);
+  const pay = s.payArea === 'Wales' ? 'Welsh pay scales (set by the Welsh Government)' : s.payArea && `${s.payArea} · M1 from £${M1[s.payArea].toLocaleString('en-GB')}`;
   const facts = [
     ['Type', `${s.type}${s.ageRange ? `, ages ${s.ageRange}` : ''}`],
     s.trust && ['Trust', s.trust],
     s.pupils && ['Pupils', `${s.pupils.toLocaleString('en-GB')}${s.capacity ? ` (capacity ${s.capacity.toLocaleString('en-GB')})` : ''}`],
     s.fsm != null && ['Free school meals', `${s.fsm}% of pupils`],
-    s.payArea && ['Pay area', `${s.payArea} · M1 from £${M1[s.payArea].toLocaleString('en-GB')}`],
+    pay && ['Pay area', pay],
     ['Address', `${s.address}, ${s.postcode}`],
     s.phone && ['Phone', s.phone],
   ].filter(Boolean);
@@ -445,11 +529,12 @@ function schoolDetail(s) {
   let gcse = '';
   if (s.gcse) {
     const g = s.gcse;
+    const change = g.maths4 != null && g.maths4Prev != null ? g.maths4 - g.maths4Prev : null;
     gcse = `<section class="block">
       <h3>GCSE maths</h3>
-      <p class="src">Year 11 in ${esc(meta.gcseYear)}${g.pupils ? ` · ${g.pupils} pupils` : ''}</p>
+      <p class="src">Year 11 in ${esc(meta.gcseYear)}${meta.gcseProvisional ? ' (provisional)' : ''}${g.pupils ? ` · ${g.pupils} pupils` : ''}</p>
       <div class="headline-nums">
-        <div><b>${pct(g.maths4, 1)}</b><span>grade 4 or above</span></div>
+        <div><b>${pct(g.maths4, 1)}</b><span>grade 4 or above${change != null ? ` · ${change >= 0 ? 'up' : 'down'} ${Math.abs(change).toFixed(1)} on ${esc(meta.gcsePrevYear)}` : ''}</span></div>
         <div><b>${pct(g.maths5, 1)}</b><span>grade 5 or above</span></div>
         ${g.engMaths4 != null ? `<div><b>${pct(g.engMaths4, 1)}</b><span>4+ in English and maths</span></div>` : ''}
       </div>
@@ -458,10 +543,10 @@ function schoolDetail(s) {
         ${cmpRows(
           [
             { label: 'This school', value: g.maths4, school: true },
-            { label: s.borough, value: b.maths4 },
-            { label: 'London', value: lon.maths4 },
+            { label: s.la, value: la.maths4 },
+            { label: s.region, value: region.maths4 },
             { label: 'England (state)', value: eng.maths4 },
-          ],
+          ].filter((r, i, all) => i === 0 || all.findIndex((x) => x.label === r.label) === i),
           100,
           (v) => `${v.toFixed(0)}%`,
         )}
@@ -474,10 +559,11 @@ function schoolDetail(s) {
     const a = s.alevel;
     const grade = a.aps != null ? minus(a.grade ?? gradeFromAps(a.aps)) : null;
     const extra = [
-      a.mathsPct != null && `${pct(a.mathsPct)} of A level students take maths${a.furtherMathsPct != null ? `, ${pct(a.furtherMathsPct)} further maths` : ''}`,
-      a.aab2fac != null && `${pct(a.aab2fac)} get AAB or better with two facilitating subjects`,
-      a.va != null && `Value added ${a.va > 0 ? '+' : ''}${a.va.toFixed(2)} grades (0 is the national average)`,
-      a.gradePrev && `Previous year’s average: ${minus(a.gradePrev)}`,
+      a.mathsPct != null && `${pct(a.mathsPct)} of A level students took maths${a.furtherMathsPct != null ? `, ${pct(a.furtherMathsPct)} further maths` : ''}`,
+      a.mathsAStarAPct != null && `${pct(a.mathsAStarAPct)} of A level maths entries were graded A* or A`,
+      a.aab != null && `${pct(a.aab)} achieved AAB or better`,
+      a.progressBand && `Progress: ${a.progressBand.toLowerCase()}${a.va != null ? ` (value added ${a.va > 0 ? '+' : ''}${a.va.toFixed(2)} grades)` : ''}`,
+      a.gradePrev && `${meta.alevelPrevYear ?? 'Previous year'} average: ${minus(a.gradePrev)}`,
     ].filter(Boolean);
     alevel = `<section class="block">
       <h3>A level</h3>
@@ -487,17 +573,17 @@ function schoolDetail(s) {
           ? `<div class="headline-nums">
         <div><b>${esc(grade)}</b><span>average grade</span></div>
         <div><b>${a.ucasPerEntry.toFixed(0)}</b><span>UCAS points per A level</span></div>
-        <div><b>≈${a.ucas3}</b><span>UCAS points for three</span></div>
+        <div><b>≈${a.ucas3}</b><span>UCAS points for best three</span></div>
       </div>
       <div class="cmp" role="group" aria-label="A level average compared">
         <span class="cmp-caption">Average grade compared (UCAS points per A level)</span>
         ${cmpRows(
           [
             { label: 'This school', value: a.aps, school: true },
-            { label: s.borough, value: b.alevelAps },
-            { label: 'London', value: lon.alevelAps },
+            { label: s.la, value: la.alevelAps },
+            { label: s.region, value: region.alevelAps },
             { label: 'England (state)', value: eng.alevelAps },
-          ],
+          ].filter((r, i, all) => i === 0 || all.findIndex((x) => x.label === r.label) === i),
           60,
           (v) => `${minus(gradeFromAps(v))} · ${ucas(v).toFixed(0)}`,
         )}
@@ -507,6 +593,13 @@ function schoolDetail(s) {
       ${extra.length ? `<ul class="why">${extra.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}
     </section>`;
   }
+
+  const noResults =
+    s.country === 'Wales'
+      ? `<p class="note">Wales does not publish exam results school by school, so there are no GCSE or A level figures here. My Local School has the school’s official information.</p>`
+      : !s.gcse && !s.alevel
+        ? '<p class="note">No published results yet. New schools appear once their first pupils finish Year 11 or Year 13.</p>'
+        : '';
 
   const jobs = state.jobsByUrn.get(s.urn) ?? [];
   const vacancies = jobs.length
@@ -518,24 +611,27 @@ function schoolDetail(s) {
       </section>`
     : '';
 
+  const L_ = s.links;
   const links = [
     s.website && `<a href="${esc(s.website)}" target="_blank" rel="noopener">School website</a>`,
-    `<a href="${esc(s.links.performance)}" target="_blank" rel="noopener">DfE performance tables</a>`,
-    `<a href="${esc(s.links.ofsted)}" target="_blank" rel="noopener">Ofsted reports</a>`,
-    `<a href="${esc(s.links.gias)}" target="_blank" rel="noopener">School register</a>`,
+    L_.performance && `<a href="${esc(L_.performance)}" target="_blank" rel="noopener">DfE school profile</a>`,
+    L_.ofsted && `<a href="${esc(L_.ofsted)}" target="_blank" rel="noopener">Ofsted reports</a>`,
+    L_.gias && `<a href="${esc(L_.gias)}" target="_blank" rel="noopener">School register</a>`,
+    L_.mylocalschool && `<a href="${esc(L_.mylocalschool)}" target="_blank" rel="noopener">My Local School</a>`,
+    L_.estyn && `<a href="${esc(L_.estyn)}" target="_blank" rel="noopener">Estyn reports</a>`,
   ].filter(Boolean);
 
   return `
     <button type="button" class="link-button back" id="back-to-list">← All schools in view</button>
     <header>
       <h2>${esc(s.name)}</h2>
-      <p class="sub">${esc(CATEGORY_LABEL[s.category])} · ${esc(s.borough)}</p>
+      <p class="sub">${esc(CATEGORY_LABEL[s.category])} · ${esc(s.district)}</p>
     </header>
     <div class="job-top">${tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')}</div>
     ${vacancies}
     ${gcse}
     ${alevel}
-    ${!s.gcse && !s.alevel ? '<p class="note">No published results yet. New schools appear once their first pupils finish Year 11 or Year 13.</p>' : ''}
+    ${noResults}
     <dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
     <p class="links-row">${links.join('')}</p>`;
 }
@@ -558,9 +654,9 @@ function openSchool(urn, { fly = true } = {}) {
   }
   if (!markers.has(urn) && map && s.lat != null) {
     // Selected from a job while filtered out: clear the map filters.
-    Object.assign(mapState, { kind: 'all', borough: '', q: '' });
+    Object.assign(mapState, { kind: 'all', district: '', q: '' });
     $('#m-kind').value = 'all';
-    $('#m-borough').value = '';
+    $('#m-district').value = '';
     $('#m-q').value = '';
     drawMarkers();
   }
@@ -583,10 +679,12 @@ function closeSchool() {
 function initMap() {
   if (map) return;
   renderer = L.canvas({ padding: 0.3, tolerance: 6 });
-  map = L.map('leaflet', { minZoom: 9, maxBounds: [[51.1, -0.75], [51.85, 0.5]], zoomSnap: 0.5 }).setView([51.5, -0.11], 10.5);
+  map = L.map('leaflet', { minZoom: 6, zoomSnap: 0.5 }).setView([state.area.lat, state.area.lon], 11);
   setTiles();
   markerLayer = L.layerGroup().addTo(map);
   map.on('moveend', renderSchoolList);
+  drawAreaOutline();
+  fitArea();
   drawMarkers();
   renderLegend();
   $('#m-metric').addEventListener('change', (e) => {
@@ -595,11 +693,11 @@ function initMap() {
     renderLegend();
     if (selectedUrn) markers.get(selectedUrn)?.bringToFront();
   });
-  for (const [id, key] of [['#m-kind', 'kind'], ['#m-borough', 'borough'], ['#m-q', 'q']]) {
+  for (const [id, key] of [['#m-kind', 'kind'], ['#m-district', 'district'], ['#m-q', 'q']]) {
     $(id).addEventListener('input', (e) => {
       mapState[key] = e.target.value.trim();
       drawMarkers();
-      if (key === 'borough') {
+      if (key === 'district') {
         const pts = visibleSchools().filter((s) => s.lat != null).map((s) => [s.lat, s.lon]);
         if (pts.length) map.fitBounds(pts, { padding: [30, 30], maxZoom: 14 });
       }
@@ -612,15 +710,31 @@ function initMap() {
 }
 
 // ---------- sources tab ----------
+const OTHER_SITES = [
+  { name: 'Harris Federation careers', url: 'https://www.harriscareers.org.uk/', note: 'about 50 academies in and around London', areas: ['london'] },
+  { name: 'Ark careers', url: 'https://arkonline.org/careers', note: 'academies in London, Birmingham, Hastings and Portsmouth', areas: ['london', 'birmingham'] },
+  { name: 'Oasis Community Learning careers', url: 'https://www.oasiscommunitylearning.org/careers', note: 'academies across England' },
+  { name: 'United Learning careers', url: 'https://www.unitedlearning.org.uk/careers', note: 'academies across England' },
+  { name: 'FE Jobs', url: 'https://www.fejobs.com/', note: 'sixth form and FE college lecturing' },
+  { name: 'Welsh Government: My Local School', url: 'https://mylocalschool.gov.wales/', note: 'official information on every Welsh school', countries: ['Wales'] },
+];
+
 function renderSources() {
+  const a = state.area;
   $('#source-grid').innerHTML = state.sources
     .map(
       (s) => `<article class="source">
         <h4>${esc(s.name)}</h4>
-        <p class="status ${s.ok ? 'ok' : 'fail'}">${s.ok ? `${s.found} London maths adverts found` : `Could not be reached at the last check${s.error ? ` (${esc(s.error)})` : ''}`}</p>
-        <a href="${esc(s.searchUrl)}" target="_blank" rel="noopener">Search on ${esc(s.name.replace(/ \(.*\)$/, ''))}</a>
+        <p class="status ${s.ok ? 'ok' : 'fail'}">${s.ok ? `${s.found} maths adverts found near ${esc(a.name)}` : `Could not be reached at the last check${s.error ? ` (${esc(s.error)})` : ''}`}</p>
+        ${s.note ? `<p class="hint">${esc(s.note)}</p>` : ''}
       </article>`,
     )
+    .join('');
+  $('#search-links').innerHTML = state.links
+    .map((l) => `<li><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.name)}</a> <span>maths jobs near ${esc(a.name)}${l.name === 'TES Jobs' ? ' (not checked automatically: TES blocks automated searches)' : ''}</span></li>`)
+    .join('');
+  $('#other-sites').innerHTML = OTHER_SITES.filter((o) => (!o.areas || o.areas.includes(a.slug)) && (!o.countries || o.countries.includes(a.country)))
+    .map((o) => `<li><a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.name)}</a> <span>${esc(o.note)}</span></li>`)
     .join('');
 }
 
@@ -635,12 +749,18 @@ async function setupRefresh() {
     $('#refresh-row').hidden = false;
     const button = $('#refresh-button');
     const label = $('#refresh-status');
-    const show = (s) => (label.textContent = s.running ? 'Checking the job boards… this takes about a minute.' : s.lastError ? `Last check failed: ${s.lastError}` : '');
+    const show = (s) => (label.textContent = s.running ? 'Checking the job boards… this takes about a minute.' : s.lastError ? `Last check failed: ${s.lastError}` : s.error ?? '');
     show(status);
     button.addEventListener('click', async () => {
+      if (state.area.custom) return;
       button.disabled = true;
       show({ running: true });
-      await fetch('api/refresh', { method: 'POST' });
+      const started = await fetch(`api/refresh?area=${encodeURIComponent(state.area.slug)}`, { method: 'POST' });
+      if (started.status === 429) {
+        show(await started.json());
+        button.disabled = false;
+        return;
+      }
       const poll = setInterval(async () => {
         const s = await (await fetch('api/status', { cache: 'no-store' })).json();
         show(s);
@@ -649,7 +769,7 @@ async function setupRefresh() {
           button.disabled = false;
           await loadJobs();
           renderAll();
-          label.textContent = `Updated ${stampFmt.format(new Date(state.generated))}.`;
+          label.textContent = `Updated ${stamp(state.generated)}.`;
         }
       }, 3000);
     });
@@ -660,7 +780,7 @@ async function setupRefresh() {
 const TABS = ['jobs', 'map', 'guide', 'sources'];
 function route() {
   const hash = location.hash.slice(1);
-  const school = hash.match(/^school-(\d+)$/)?.[1];
+  const school = hash.match(/^school-([A-Z]?\d+)$/)?.[1];
   const tab = school ? 'map' : TABS.includes(hash) ? hash : 'jobs';
   for (const t of TABS) {
     $(`#${t}`).hidden = t !== tab;
@@ -676,30 +796,78 @@ function route() {
   window.scrollTo({ top: 0 });
 }
 
-// ---------- boot ----------
-// Inside the apps the page can check the job boards itself: on Android by
-// running the pipeline here over Capacitor's native HTTP, on the desktop by
-// asking Electron's main process to run it.
-const NATIVE = Boolean(window.Capacitor?.isNativePlatform?.());
-const DESKTOP = window.squareOneDesktop ?? null;
-const IN_APP = NATIVE || Boolean(DESKTOP);
-const CACHE_KEY = 'sq1-jobs';
-const AUTO_REFRESH_HOURS = 6;
+// ---------- loading an area ----------
+const cacheKey = (area) => `sq1-jobs:${area.slug}`;
 
 function applyJobs(data) {
-  state.jobs = data.jobs;
-  state.sources = data.sources;
-  state.generated = data.generated;
+  state.jobs = data?.jobs ?? [];
+  state.sources = data?.sources ?? [];
+  state.links = data?.links ?? [];
+  state.generated = data?.generated ?? null;
   state.jobsByUrn = new Map();
   for (const j of state.jobs) if (j.urn) state.jobsByUrn.set(j.urn, [...(state.jobsByUrn.get(j.urn) ?? []), j]);
 }
 
 async function loadJobs() {
-  const bundled = await (await fetch('data/jobs.json', { cache: 'no-cache' })).json();
-  const cached = IN_APP ? store.get(CACHE_KEY, null) : null;
-  applyJobs(cached?.jobs && cached.generated > bundled.generated ? cached : bundled);
+  const area = state.area;
+  let bundled = null;
+  if (!area.custom) {
+    try {
+      bundled = await (await fetch(`data/jobs/${area.slug}.json`, { cache: 'no-cache' })).json();
+    } catch {}
+  }
+  const cached = IN_APP ? store.get(cacheKey(area), null) : null;
+  applyJobs(cached?.jobs && (!bundled || cached.generated > bundled.generated) ? cached : bundled);
+  if (!state.links.length) state.links = searchLinksFor(area);
 }
 
+// Links for an area with no results yet (a new custom area).
+function searchLinksFor(area) {
+  const mi = Math.round(area.radius);
+  const b = encodeURIComponent(area.board);
+  return [
+    area.country !== 'Wales' && { name: 'Teaching Vacancies (GOV.UK)', url: `https://teaching-vacancies.service.gov.uk/jobs?location=${b}&radius=${mi}&subjects%5B%5D=Mathematics` },
+    { name: 'Eteach', url: `https://www.eteach.com/jobs?keywords=maths&location=${b}` },
+    { name: 'TES Jobs', url: `https://www.tes.com/jobs/search?subjects=Mathematics&displayLocation=${b}&lat=${area.lat}&lon=${area.lon}&distance=${mi}&distanceUnit=mi` },
+  ].filter(Boolean);
+}
+
+async function loadSchools() {
+  state.regions = regionsForArea(state.area, state.index.regions);
+  const lists = await Promise.all(
+    state.regions.map(async (r) => {
+      if (!state.regionCache.has(r.slug)) state.regionCache.set(r.slug, (await (await fetch(`data/schools/${r.slug}.json`)).json()).schools);
+      return state.regionCache.get(r.slug);
+    }),
+  );
+  state.schools = lists.flat();
+  state.areaSchools = state.schools.filter((s) => inArea(state.area, s));
+  state.schoolByUrn = new Map(state.schools.map((s) => [s.urn, s]));
+}
+
+async function setArea(area) {
+  state.area = area;
+  store.set('sq1-area', area);
+  $('#area-name').textContent = areaLabel(area);
+  $('#eyebrow-area').textContent = area.name;
+  $('#brand-area').textContent = area.name;
+  document.title = `Square One · maths teaching jobs in ${area.name}`;
+  await Promise.all([loadSchools(), loadJobs()]);
+  fillAreaFilters();
+  writeFilters();
+  selectedUrn = null;
+  $('#school-detail').hidden = true;
+  $('#school-list-view').hidden = false;
+  if (map) {
+    drawAreaOutline();
+    fitArea();
+  }
+  renderAll();
+  setSync(state.generated ? `Jobs checked ${stamp(state.generated)}` : IN_APP ? 'Not checked yet.' : 'Not collected yet.');
+  if (IN_APP) checkIfStale();
+}
+
+// ---------- refreshing in the apps ----------
 function setSync(text, busy = false) {
   $('#sync-text').textContent = text;
   $('#refresh-status').textContent = busy ? text : '';
@@ -712,30 +880,35 @@ let refreshing = null;
 
 function refreshOnDevice() {
   if (refreshing) return refreshing;
+  const area = state.area;
   refreshing = (async () => {
     setSync('Checking the job boards…', true);
     try {
       const onProgress = ({ step, total, source }) => setSync(`Checking ${source} (${step} of ${total})…`, true);
+      const previous = { jobs: state.jobs };
       let data;
       if (DESKTOP) {
-        data = await DESKTOP.refreshJobs({ jobs: state.jobs }, onProgress);
+        data = await DESKTOP.refreshJobs(area, previous, onProgress);
       } else {
         const [{ buildJobsData }, establishments] = await Promise.all([
           import('./engine/lib/pipeline.js'),
-          fetch('data/london-establishments.json').then((r) => r.json()),
+          Promise.all(state.regions.map(async (r) => (await fetch(`data/establishments/${r.slug}.json`)).json())).then((l) => l.flat()),
         ]);
-        data = await buildJobsData({ schools: state.schools, establishments, previous: { jobs: state.jobs }, onProgress });
+        data = await buildJobsData({ area, schools: state.schools, establishments, previous, onProgress });
       }
       if (!data.sources.some((s) => s.ok)) throw new Error('none of the job boards answered');
+      store.set(cacheKey(area), data);
+      if (state.area !== area) return; // the user moved on while we were checking
       const before = new Set(state.jobs.map(jobKey));
-      const fresh = data.jobs.filter((j) => !before.has(jobKey(j))).length;
-      store.set(CACHE_KEY, data);
+      const fresh = state.generated ? data.jobs.filter((j) => !before.has(jobKey(j))).length : 0;
       applyJobs(data);
+      fillAreaFilters();
+      writeFilters();
       renderAll();
-      setSync(`Updated ${stampFmt.format(new Date(data.generated))}${fresh ? ` · ${fresh} new job${fresh === 1 ? '' : 's'}` : ''}`);
+      setSync(`Updated ${stamp(data.generated)}${fresh ? ` · ${fresh} new job${fresh === 1 ? '' : 's'}` : ''}`);
     } catch (e) {
       console.error(e);
-      setSync(`Could not check the job boards (${e.message}). Showing jobs from ${stampFmt.format(new Date(state.generated))}.`);
+      if (state.area === area) setSync(`Could not check the job boards (${e.message}).${state.generated ? ` Showing jobs from ${stamp(state.generated)}.` : ''}`);
     } finally {
       refreshing = null;
     }
@@ -743,55 +916,167 @@ function refreshOnDevice() {
   return refreshing;
 }
 
+// Check automatically when the jobs are more than a few hours old, unless
+// the device is offline or in data saver mode.
+function checkIfStale() {
+  const ageHours = state.generated ? (Date.now() - new Date(state.generated)) / 36e5 : Infinity;
+  if (ageHours > AUTO_REFRESH_HOURS && navigator.onLine !== false && !navigator.connection?.saveData) refreshOnDevice();
+}
+
 function setupSync() {
-  setSync(`Jobs checked ${stampFmt.format(new Date(state.generated))}`);
   if (!IN_APP) return;
   document.documentElement.classList.add('native');
   $('#sync-button').hidden = false;
   $('#sync-button').addEventListener('click', refreshOnDevice);
   $('#refresh-row').hidden = false;
   $('#refresh-button').addEventListener('click', refreshOnDevice);
-  // Check automatically when the jobs are more than a few hours old, unless
-  // the phone is offline or in data saver mode.
-  const checkIfStale = () => {
-    const ageHours = (Date.now() - new Date(state.generated)) / 36e5;
-    if (ageHours > AUTO_REFRESH_HOURS && navigator.onLine !== false && !navigator.connection?.saveData) refreshOnDevice();
-  };
-  checkIfStale();
   // A desktop window can stay open for days.
   setInterval(checkIfStale, 30 * 60 * 1000);
 }
 
+// ---------- choosing an area ----------
+const RADII = [5, 10, 15, 25];
+
+function renderPresets() {
+  $('#area-presets').innerHTML = Object.values(state.presets)
+    .map(
+      (p) => `<li><button type="button" class="area-option${p.slug === state.area.slug ? ' current' : ''}" data-slug="${p.slug}">
+        <b>${esc(p.name)}</b>
+        <span>${p.region ? 'Greater London' : `within ${p.radius} miles`}${p.country === 'Wales' ? ' · Wales' : ''}</span>
+        <span class="hint">${p.generated ? `${p.jobs} maths job${p.jobs === 1 ? '' : 's'} · checked ${stamp(p.generated)}` : 'not checked yet'}</span>
+      </button></li>`,
+    )
+    .join('');
+}
+
+// Look a place up with postcodes.io: a full postcode, an outward code (BN1)
+// or a town name. Only England and Wales are covered.
+async function findPlaces(text) {
+  const q = text.trim();
+  const api = 'https://api.postcodes.io';
+  const fromPostcode = (r, label) => r && [{ name: label, board: label, lat: r.latitude, lon: r.longitude, country: r.country?.[0] ?? r.country, detail: [r.admin_district?.[0] ?? r.admin_district, r.region].filter(Boolean).join(', ') }];
+  if (/^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$/i.test(q)) {
+    const r = await (await fetch(`${api}/postcodes/${encodeURIComponent(q)}`)).json();
+    return fromPostcode(r.result, r.result?.postcode ?? q.toUpperCase()) ?? [];
+  }
+  if (/^[A-Z]{1,2}\d[A-Z\d]?$/i.test(q)) {
+    const r = await (await fetch(`${api}/outcodes/${encodeURIComponent(q)}`)).json();
+    return fromPostcode(r.result, q.toUpperCase()) ?? [];
+  }
+  const r = await (await fetch(`${api}/places?q=${encodeURIComponent(q)}&limit=20`)).json();
+  const rank = { City: 0, Town: 1, 'Suburban Area': 2, Village: 3, Hamlet: 4 };
+  return (r.result ?? [])
+    .filter((p) => p.local_type in rank)
+    .sort((a, b) => rank[a.local_type] - rank[b.local_type])
+    .slice(0, 6)
+    .map((p) => {
+      // Welsh places come with the Welsh name first; the job boards want English.
+      const name = p.name_1_lang === 'cym' && p.name_2 ? p.name_2 : p.name_1;
+      return { name, board: name, lat: p.latitude, lon: p.longitude, country: p.country, detail: [p.local_type, p.county_unitary, p.region].filter(Boolean).join(', ') };
+    });
+}
+
+function setupAreaPicker() {
+  const dialog = $('#area-dialog');
+  $('#area-button').addEventListener('click', () => {
+    renderPresets();
+    $('#area-web-note').hidden = IN_APP;
+    $('#area-radius').value = String(state.area.custom ? state.area.radius : 10);
+    dialog.showModal();
+  });
+  $('#area-close').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', (e) => e.target === dialog && dialog.close());
+  $('#area-presets').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-slug]');
+    if (!btn) return;
+    dialog.close();
+    setArea({ ...state.presets[btn.dataset.slug] });
+  });
+
+  $('#area-search').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = $('#area-q').value;
+    const out = $('#area-results');
+    if (!text.trim()) return;
+    out.innerHTML = '<li class="hint">Looking it up…</li>';
+    try {
+      const found = (await findPlaces(text)).filter((p) => p.country === 'England' || p.country === 'Wales');
+      out.innerHTML = found.length
+        ? found
+            .map((p, i) => `<li><button type="button" class="area-option" data-i="${i}"><b>${esc(p.name)}</b><span>${esc(p.detail)}</span></button></li>`)
+            .join('')
+        : '<li class="hint">No town or postcode in England or Wales matched that. Try a nearby town or a postcode.</li>';
+      out.onclick = (ev) => {
+        const b = ev.target.closest('button[data-i]');
+        if (!b) return;
+        const p = found[Number(b.dataset.i)];
+        const radius = Number($('#area-radius').value);
+        dialog.close();
+        setArea({
+          slug: `custom-${p.lat.toFixed(3)}-${p.lon.toFixed(3)}-${radius}`,
+          name: p.name,
+          board: p.board,
+          lat: p.lat,
+          lon: p.lon,
+          radius,
+          country: p.country,
+          custom: true,
+        });
+      };
+    } catch (err) {
+      out.innerHTML = `<li class="hint">Could not look that up (${esc(err.message)}). Check your connection.</li>`;
+    }
+  });
+  $('#area-radius').innerHTML = RADII.map((r) => `<option value="${r}">${r} miles</option>`).join('');
+  $('#area-search').hidden = !IN_APP;
+}
+
+// ---------- boot ----------
 function renderAll() {
   renderJobs();
   renderSources();
-  const ectCount = state.jobs.filter((j) => j.ect === 'yes').length;
   $('#tally-jobs').textContent = state.jobs.length;
-  $('#tally-ect').textContent = ectCount;
-  $('#tally-schools').textContent = state.schools.length;
-  $('#updated').textContent = `Jobs checked ${stampFmt.format(new Date(state.generated))} · results ${state.schoolsMeta.gcseYear}`;
-  if (map) drawMarkers();
+  $('#tally-ect').textContent = state.jobs.filter((j) => j.ect === 'yes').length;
+  $('#tally-schools').textContent = state.areaSchools.length;
+  $('#updated').textContent = `Jobs checked ${stamp(state.generated)} · GCSE results ${state.index.gcseYear}`;
+  if (map) {
+    drawMarkers();
+    renderLegend();
+  }
+}
+
+function initialArea() {
+  const wanted = new URLSearchParams(location.search).get('area');
+  if (wanted && state.presets[wanted]) return { ...state.presets[wanted] };
+  const saved = store.get('sq1-area', null);
+  if (saved?.custom && IN_APP) return saved;
+  if (saved?.slug && state.presets[saved.slug]) return { ...state.presets[saved.slug] };
+  return { ...state.presets.london };
 }
 
 async function boot() {
   setupTheme();
   try {
-    const [schools] = await Promise.all([(await fetch('data/schools.json')).json(), loadJobs()]);
-    state.schoolsMeta = schools;
-    state.schools = schools.schools;
-    state.schoolByUrn = new Map(state.schools.map((s) => [s.urn, s]));
+    const [index, presets] = await Promise.all([
+      (await fetch('data/schools/index.json')).json(),
+      (await fetch('data/areas.json', { cache: 'no-cache' })).json(),
+    ]);
+    state.index = index;
+    state.presets = presets;
   } catch (e) {
-    $('#results-count').textContent = 'The job data could not be loaded. If you opened index.html straight from disk, run `npm start` and use http://localhost:8080 instead.';
+    $('#results-count').textContent = 'The data could not be loaded. If you opened index.html straight from disk, run `npm start` and use http://localhost:8080 instead.';
     console.error(e);
     return;
   }
-  for (const id of ['guide-gcse-year', 'data-years']) $(`#${id}`).textContent = state.schoolsMeta.gcseYear;
-  $('#guide-alevel-year').textContent = state.schoolsMeta.alevelYear;
+  $('#guide-gcse-year').textContent = `${state.index.gcseYear}${state.index.gcseProvisional ? ' (provisional)' : ''}`;
+  $('#guide-alevel-year').textContent = state.index.alevelYear;
+  $('#data-years').textContent = `GCSE ${state.index.gcseYear}, A level ${state.index.alevelYear}`;
   setupFilters();
-  renderAll();
+  setupAreaPicker();
+  setupSync();
+  await setArea(initialArea());
   window.addEventListener('hashchange', route);
   route();
-  setupSync();
   setupRefresh();
 }
 

@@ -49,22 +49,23 @@ jobs:
         with:
           path: |
             .cache
-            public/data/jobs.json
-            public/data/schools.json
-            scripts/data/london-establishments.json
+            public/data/jobs
+            public/data/areas.json
+            public/data/schools
+            scripts/data/establishments
           key: site-data-${{ github.run_id }}
           restore-keys: site-data-
 
       - name: Rebuild school data (Mondays, or when asked)
         if: github.event_name == 'workflow_dispatch' && inputs.rebuild_schools || github.event_name == 'schedule'
         run: |
-          if [ "${{ inputs.rebuild_schools }}" = "true" ] || [ "$(date -u +%u)" = "1" ] || [ ! -s public/data/schools.json ]; then
-            npm run schools || echo "::warning::School data rebuild failed; keeping the previous schools.json"
+          if [ "${{ inputs.rebuild_schools }}" = "true" ] || [ "$(date -u +%u)" = "1" ] || [ ! -s public/data/schools/index.json ]; then
+            npm run schools || echo "::warning::School data rebuild failed; keeping the previous school data"
           else
             echo "Not Monday; keeping the existing school data."
           fi
 
-      - name: Collect jobs from the job boards
+      - name: Collect jobs for every preset area
         run: npm run jobs
 
       - name: Check GitHub Pages is switched on

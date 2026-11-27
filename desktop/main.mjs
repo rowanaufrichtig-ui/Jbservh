@@ -5,8 +5,9 @@
 //   npm run desktop            run from source
 //   npm run desktop:mac        build the .dmg (on a Mac)
 //
-// SQUAREONE_SMOKE=1 opens the app hidden, checks the page rendered, presses
-// "Check now", waits for the job boards and exits 0/1 (used in CI).
+// SQUAREONE_SMOKE=1 opens the app, checks the page rendered, presses "Check
+// now" for London, switches to Cardiff and checks again, opens the map and
+// exits 0/1 (used in CI).
 
 import { app, BrowserWindow, ipcMain, nativeTheme, net, protocol, session, shell } from 'electron';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -45,20 +46,26 @@ function identifyToTileServer() {
 const readJSON = async (path) => JSON.parse(await readFile(path, 'utf8'));
 let refreshing = null;
 
-// Run the job pipeline for the renderer, streaming progress back to it.
-ipcMain.handle('jobs:refresh', async (event, previous) => {
+// Run the job pipeline for the renderer, for whichever area it has chosen,
+// streaming progress back to it.
+ipcMain.handle('jobs:refresh', async (event, area, previous) => {
   if (refreshing) return refreshing;
   refreshing = (async () => {
-    const { buildJobsData } = await import(pathToFileURL(join(WEB, 'engine', 'lib', 'pipeline.js')).toString());
-    const [schools, establishments] = await Promise.all([
-      readJSON(join(WEB, 'data', 'schools.json')),
-      readJSON(join(WEB, 'data', 'london-establishments.json')),
-    ]);
+    const engine = (name) => import(pathToFileURL(join(WEB, 'engine', 'lib', `${name}.js`)).toString());
+    const [{ buildJobsData }, { regionsForArea }] = await Promise.all([engine('pipeline'), engine('places')]);
+    const index = await readJSON(join(WEB, 'data', 'schools', 'index.json'));
+    const regions = regionsForArea(area, index.regions);
+    const schools = [], establishments = [];
+    for (const r of regions) {
+      schools.push(...(await readJSON(join(WEB, 'data', 'schools', `${r.slug}.json`))).schools);
+      establishments.push(...(await readJSON(join(WEB, 'data', 'establishments', `${r.slug}.json`))));
+    }
     return buildJobsData({
-      schools: schools.schools,
+      area,
+      schools,
       establishments,
       previous,
-      log: (...a) => console.log('[jobs]', ...a),
+      log: (...a) => console.log(`[jobs:${area.name}]`, ...a),
       onProgress: (p) => !event.sender.isDestroyed() && event.sender.send('jobs:progress', p),
     });
   })();
@@ -123,6 +130,12 @@ async function smokeTest(win) {
   await js(`document.querySelector('#sync-button').click()`);
   const finished = await wait(`/^(Updated|Could not)/.test(document.querySelector('#sync-text').textContent)`, 240000);
   const after = await js(`({ sync: document.querySelector('#sync-text').textContent, count: document.querySelector('#results-count').textContent })`);
+  // Switch area and check again there.
+  await js(`document.querySelector('#area-button').click(); document.querySelector('button[data-slug="cardiff"]').click()`);
+  const switched = await wait(`document.querySelector('#area-name').textContent.startsWith('Cardiff') && !document.querySelector('#sync-button').disabled`, 30000);
+  await js(`document.querySelector('#sync-button').click()`);
+  const cardiffDone = await wait(`/^(Updated|Could not)/.test(document.querySelector('#sync-text').textContent)`, 240000);
+  const cardiff = await js(`({ sync: document.querySelector('#sync-text').textContent, schools: document.querySelector('#tally-schools').textContent, pay: [...document.querySelectorAll('#f-pay option')].map((o) => o.textContent) })`);
   await js(`location.hash = 'map'`);
   const mapOk = await wait(`document.querySelectorAll('.leaflet-interactive, canvas').length > 0 && document.querySelector('#school-list li') !== null`, 30000);
   if (process.env.SQUAREONE_SCREENSHOT) {
@@ -130,8 +143,11 @@ async function smokeTest(win) {
     await new Promise((r) => setTimeout(r, 4000));
     await writeFile(process.env.SQUAREONE_SCREENSHOT, (await win.webContents.capturePage()).toPNG());
   }
-  const ok = rendered && before.desktop && Number(before.schools) > 400 && finished && /^Updated/.test(after.sync) && mapOk && errors.length === 0;
-  console.log(JSON.stringify({ ok, rendered, before, after, mapOk, errors }, null, 2));
+  const ok =
+    rendered && before.desktop && Number(before.schools) > 400 && finished && /^Updated/.test(after.sync) &&
+    switched && cardiffDone && /^Updated/.test(cardiff.sync) && Number(cardiff.schools) > 20 && cardiff.pay.includes('Wales') &&
+    mapOk && errors.length === 0;
+  console.log(JSON.stringify({ ok, rendered, before, after, cardiff, mapOk, errors }, null, 2));
   app.exit(ok ? 0 : 1);
 }
 

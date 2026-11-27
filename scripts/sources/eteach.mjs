@@ -12,7 +12,8 @@ export const meta = {
   key: 'eteach',
   name: 'Eteach',
   home: 'https://www.eteach.com',
-  searchUrl: 'https://www.eteach.com/jobs?keywords=maths&location=London',
+  searchUrl: (area) => `https://www.eteach.com/jobs?keywords=maths&location=${encodeURIComponent(area.board)}`,
+  covers: () => true,
 };
 
 const MATHS = /math|numeracy|statistic/i;
@@ -25,10 +26,11 @@ function fundingOf(institution) {
   return null;
 }
 
-async function search(keywords) {
+async function search(area, keywords) {
   const out = [];
   for (let page = 1; page <= 6; page++) {
-    const q = new URLSearchParams({ keywords, location: 'London', pt: '51.5072,-0.1276', radius: '15', page: String(page), site: SITE });
+    const radius = String(Math.round(area.region ? area.radius + 5 : area.radius));
+    const q = new URLSearchParams({ keywords, location: area.board, pt: `${area.lat},${area.lon}`, radius, page: String(page), site: SITE });
     const data = await getJSON(`${API}/search/results?${q}`, { headers: HEADERS });
     out.push(...(data.results ?? []).filter((r) => r.type === 'job' && r.job).map((r) => r.job));
     if (data.isLastPage || !data.results?.length) break;
@@ -67,10 +69,10 @@ async function detail(item) {
   };
 }
 
-export async function scrape() {
+export async function scrape(area) {
   const byId = new Map();
   for (const kw of ['maths', 'mathematics', 'maths teacher']) {
-    for (const j of await search(kw)) if (MATHS.test(j.title)) byId.set(String(j.id), j);
+    for (const j of await search(area, kw)) if (MATHS.test(j.title)) byId.set(String(j.id), j);
   }
   const jobs = await mapLimit([...byId.values()], 3, (it) =>
     detail(it).catch((e) => {

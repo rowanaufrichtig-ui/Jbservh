@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Local server: serves the site from public/ and lets the page trigger a
-// fresh scrape of the job boards (POST /api/refresh).
+// fresh scrape of the job boards for one area (POST /api/refresh?area=cardiff).
 //
 //   npm start            -> http://localhost:8080
 //   PORT=3000 npm start
@@ -10,6 +10,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { extname, join, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { presetBySlug } from './scripts/lib/places.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(ROOT, 'public');
@@ -26,17 +27,19 @@ const TYPES = {
   '.ico': 'image/x-icon',
 };
 
-const refresh = { running: false, lastRun: 0, lastError: null };
+const refresh = { running: false, area: null, lastError: null };
+const lastRun = new Map(); // area slug -> time of last check
 
-function runScrape() {
+function runScrape(slug) {
   refresh.running = true;
+  refresh.area = slug;
   refresh.lastError = null;
-  const child = spawn(process.execPath, [join(ROOT, 'scripts', 'scrape-jobs.mjs')], { stdio: ['ignore', 'inherit', 'pipe'] });
+  const child = spawn(process.execPath, [join(ROOT, 'scripts', 'scrape-jobs.mjs'), '--area', slug], { stdio: ['ignore', 'inherit', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', (d) => (stderr += d));
   child.on('close', (code) => {
     refresh.running = false;
-    refresh.lastRun = Date.now();
+    lastRun.set(slug, Date.now());
     if (code !== 0) refresh.lastError = stderr.trim().split('\n').pop() || `exit code ${code}`;
   });
 }
@@ -52,11 +55,13 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/api/status') return send(res, 200, refresh);
   if (url.pathname === '/api/refresh') {
     if (req.method !== 'POST') return send(res, 405, { error: 'Use POST' });
+    const slug = url.searchParams.get('area') ?? 'london';
+    if (!presetBySlug(slug)) return send(res, 400, { error: `Unknown area "${slug}"` });
     if (refresh.running) return send(res, 202, refresh);
-    if (Date.now() - refresh.lastRun < MIN_GAP_MS) {
-      return send(res, 429, { ...refresh, error: 'The job boards were checked less than 10 minutes ago.' });
+    if (Date.now() - (lastRun.get(slug) ?? 0) < MIN_GAP_MS) {
+      return send(res, 429, { ...refresh, error: 'The job boards were checked for this area less than 10 minutes ago.' });
     }
-    runScrape();
+    runScrape(slug);
     return send(res, 202, refresh);
   }
 

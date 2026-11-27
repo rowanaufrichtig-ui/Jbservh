@@ -12,6 +12,7 @@ test('roles are classified from the job title', () => {
   assert.equal(roleOf('Teacher of Maths'), 'teacher');
   assert.equal(roleOf('Lecturer Maths (0.8 FTE)'), 'teacher');
   assert.equal(roleOf('Second in Charge Maths'), 'leadership');
+  assert.equal(roleOf('Second in Maths'), 'leadership');
   assert.equal(roleOf('KS5 Lead for Maths'), 'leadership');
   assert.equal(roleOf('Head of Maths Teacher'), 'leadership');
   assert.equal(roleOf('Trainee Teacher of Secondary Mathematics'), 'trainee');

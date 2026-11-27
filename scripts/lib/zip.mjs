@@ -1,4 +1,4 @@
-// Read entries from a .zip (or .xlsx) buffer using only node:zlib.
+// Read entries from a .zip (or .ods) buffer using only node:zlib.
 
 import { inflateRawSync } from 'node:zlib';
 

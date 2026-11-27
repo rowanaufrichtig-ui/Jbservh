@@ -1,18 +1,22 @@
 #!/usr/bin/env node
-// Collects maths teaching jobs in London from several job boards, works out
-// which school each one is at, how suitable it is for an ECT, and writes
-// public/data/jobs.json for the website. The work itself is in
-// lib/pipeline.mjs, which the Android app also runs on the phone.
+// Collects maths teaching jobs for each preset area (London, Brighton,
+// Cardiff ...) from the job boards, works out which school each one is at
+// and how suitable it is for an ECT, and writes public/data/jobs/<area>.json
+// plus public/data/areas.json. The work itself is in lib/pipeline.mjs, which
+// the Android and Mac apps also run for any place the user picks.
+//
+//   npm run jobs                  every preset area
+//   npm run jobs -- --area cardiff  just one
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildJobsData } from './lib/pipeline.mjs';
+import { PRESETS, regionsForArea } from './lib/places.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const OUT = join(ROOT, 'public', 'data', 'jobs.json');
+const DATA = join(ROOT, 'public', 'data');
 
-const log = (...a) => console.log('[jobs]', ...a);
 const readJSON = async (p, fallback) => {
   try {
     return JSON.parse(await readFile(p, 'utf8'));
@@ -21,27 +25,51 @@ const readJSON = async (p, fallback) => {
   }
 };
 
+async function scrapeArea(area, schoolsIndex) {
+  const log = (...a) => console.log(`[jobs:${area.slug}]`, ...a);
+  const regions = regionsForArea(area, schoolsIndex.regions);
+  const schools = [], establishments = [];
+  for (const r of regions) {
+    schools.push(...(await readJSON(join(DATA, 'schools', `${r.slug}.json`), { schools: [] })).schools);
+    establishments.push(...(await readJSON(join(ROOT, 'scripts', 'data', 'establishments', `${r.slug}.json`), [])));
+  }
+  log(`regions: ${regions.map((r) => r.name).join(', ')}`);
+  const file = join(DATA, 'jobs', `${area.slug}.json`);
+  const data = await buildJobsData({ area, schools, establishments, previous: await readJSON(file, { jobs: [] }), log });
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify(data));
+
+  const count = (f) => data.jobs.filter(f).length;
+  log(`wrote ${data.jobs.length} maths jobs (dropped ${JSON.stringify(data.dropped)})`);
+  log(`  state ${count((j) => j.sector === 'state' || j.sector === 'trust')}, independent ${count((j) => j.sector === 'independent')}, ECT yes ${count((j) => j.ect === 'yes')}, likely ${count((j) => j.ect === 'likely')}`);
+  return data;
+}
+
 async function main() {
-  const schoolsData = await readJSON(join(ROOT, 'public', 'data', 'schools.json'), null);
-  const establishments = await readJSON(join(ROOT, 'scripts', 'data', 'london-establishments.json'), []);
-  if (!schoolsData) throw new Error('Run `npm run schools` first to build public/data/schools.json');
+  const schoolsIndex = await readJSON(join(DATA, 'schools', 'index.json'), null);
+  if (!schoolsIndex) throw new Error('Run `npm run schools` first to build public/data/schools/');
+  const only = process.argv.includes('--area') ? process.argv[process.argv.indexOf('--area') + 1] : null;
+  const areas = only ? PRESETS.filter((p) => p.slug === only) : PRESETS;
+  if (!areas.length) throw new Error(`Unknown area "${only}". Choose from: ${PRESETS.map((p) => p.slug).join(', ')}`);
 
-  const data = await buildJobsData({
-    schools: schoolsData.schools,
-    establishments,
-    previous: await readJSON(OUT, { jobs: [] }),
-    log,
+  const summary = await readJSON(join(DATA, 'areas.json'), {});
+  let anyOk = false;
+  for (const area of areas) {
+    try {
+      const data = await scrapeArea(area, schoolsIndex);
+      anyOk ||= data.sources.some((s) => s.ok);
+      summary[area.slug] = { generated: data.generated, jobs: data.jobs.length, ect: data.jobs.filter((j) => j.ect === 'yes').length };
+    } catch (e) {
+      console.error(`[jobs:${area.slug}] failed: ${e.message}`);
+    }
+  }
+  // Presets in their fixed order, with when each was last checked.
+  const areasFile = PRESETS.map((p) => {
+    const last = summary[p.slug] ?? {};
+    return { ...p, generated: last.generated ?? null, jobs: last.jobs ?? null, ect: last.ect ?? null };
   });
-
-  await mkdir(dirname(OUT), { recursive: true });
-  await writeFile(OUT, JSON.stringify(data));
-
-  const out = data.jobs;
-  const count = (f) => out.filter(f).length;
-  log(`wrote ${out.length} London maths jobs (dropped ${JSON.stringify(data.dropped)})`);
-  log(`  state ${count((j) => j.sector === 'state' || j.sector === 'trust')}, independent ${count((j) => j.sector === 'independent')}, other ${count((j) => !['state', 'trust', 'independent'].includes(j.sector))}`);
-  log(`  ECT yes ${count((j) => j.ect === 'yes')}, likely ${count((j) => j.ect === 'likely')}, with sixth form ${count((j) => j.sixthForm)}`);
-  if (data.sources.every((s) => !s.ok)) process.exitCode = 1;
+  await writeFile(join(DATA, 'areas.json'), JSON.stringify(Object.fromEntries(areasFile.map((a) => [a.slug, a]))));
+  if (!anyOk) process.exitCode = 1;
 }
 
 main().catch((e) => {

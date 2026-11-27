@@ -13,9 +13,9 @@ async function bulk(path, payload) {
   return (await res.json()).result ?? [];
 }
 
-const place = (r) => r && { region: r.region, borough: r.admin_district, lat: r.latitude, lon: r.longitude, postcode: r.postcode };
+const place = (r) => r && { region: r.region, district: r.admin_district, country: r.country, lat: r.latitude, lon: r.longitude, postcode: r.postcode };
 
-// postcodes -> Map(postcode -> { region, borough, lat, lon })
+// postcodes -> Map(postcode -> { region, district, country, lat, lon })
 export async function lookupPostcodes(postcodes) {
   const out = new Map();
   const list = [...new Set(postcodes.filter(Boolean))];
@@ -26,7 +26,7 @@ export async function lookupPostcodes(postcodes) {
   return out;
 }
 
-// [{lat, lon}] -> array of { region, borough, postcode } (nearest postcode)
+// [{lat, lon}] -> array of { region, district, country, postcode } (nearest postcode)
 export async function reverseGeocode(points) {
   const out = [];
   for (let i = 0; i < points.length; i += 100) {

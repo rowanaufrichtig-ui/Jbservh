@@ -8,22 +8,20 @@ import { htmlToText, decodeEntities } from '../lib/text.mjs';
 
 const BASE = 'https://teaching-vacancies.service.gov.uk';
 
+// "London" on its own searches the whole of Greater London; anywhere else is
+// a place name or postcode plus a radius in miles.
+const where = (area) =>
+  area.region === 'London' ? 'location=London' : `location=${encodeURIComponent(area.board)}&radius=${Math.round(area.radius)}`;
+
 export const meta = {
   key: 'tv',
   name: 'Teaching Vacancies (GOV.UK)',
   home: BASE,
-  searchUrl: `${BASE}/jobs?location=London&subjects%5B%5D=Mathematics&ect_statuses%5B%5D=ect_suitable`,
+  note: 'England only',
+  searchUrl: (area) => `${BASE}/jobs?${where(area)}&subjects%5B%5D=Mathematics&ect_statuses%5B%5D=ect_suitable`,
+  // The service only lists schools in England.
+  covers: (area) => area.country !== 'Wales',
 };
-
-const SEARCHES = [
-  'keyword=maths&location=London',
-  'keyword=mathematics&location=London',
-  'location=London&subjects%5B%5D=Mathematics',
-];
-const ECT_SEARCHES = [
-  'keyword=maths&location=London&ect_statuses%5B%5D=ect_suitable',
-  'location=London&subjects%5B%5D=Mathematics&ect_statuses%5B%5D=ect_suitable',
-];
 
 async function slugsFor(query, maxPages = 8) {
   const slugs = new Set();
@@ -86,11 +84,16 @@ async function job(slug, ectSlugs) {
   };
 }
 
-export async function scrape() {
+export async function scrape(area) {
+  const w = where(area);
   const all = new Set();
-  for (const q of SEARCHES) (await slugsFor(q)).forEach((s) => all.add(s));
+  for (const q of [`keyword=maths&${w}`, `keyword=mathematics&${w}`, `${w}&subjects%5B%5D=Mathematics`]) {
+    (await slugsFor(q)).forEach((s) => all.add(s));
+  }
   const ect = new Set();
-  for (const q of ECT_SEARCHES) (await slugsFor(q)).forEach((s) => ect.add(s));
+  for (const q of [`keyword=maths&${w}`, `${w}&subjects%5B%5D=Mathematics`]) {
+    (await slugsFor(`${q}&ect_statuses%5B%5D=ect_suitable`)).forEach((s) => ect.add(s));
+  }
   const jobs = await mapLimit([...all], 3, (slug) =>
     job(slug, ect).catch((e) => {
       console.warn(`[tv] ${slug}: ${e.message}`);
