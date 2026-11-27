@@ -15,6 +15,12 @@ on:
 permissions:
   contents: write # to update the "android-latest" release
 
+# A newer push makes a running build out of date, and only one build at a
+# time should replace the "android-latest" release.
+concurrency:
+  group: android-latest
+  cancel-in-progress: true
+
 jobs:
   apk:
     runs-on: ubuntu-latest

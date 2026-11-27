@@ -14,6 +14,12 @@ on:
 permissions:
   contents: write # to update the "mac-latest" release
 
+# A newer push makes a running build out of date, and only one build at a
+# time should replace the "mac-latest" release.
+concurrency:
+  group: mac-latest
+  cancel-in-progress: true
+
 jobs:
   mac:
     runs-on: macos-latest # Apple Silicon
