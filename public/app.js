@@ -472,7 +472,9 @@ function renderSchoolList() {
   // The map shows neighbouring schools for context; the list keeps to the area.
   const inView = visibleSchools().filter((s) => s.lat != null && inArea(state.area, s) && bounds.contains([s.lat, s.lon]));
   inView.sort((a, b) => (m.value(b) ?? -1) - (m.value(a) ?? -1));
-  const what = mapState.metric === 'alevel' ? 'best A level results first' : 'best GCSE maths first';
+  // Welsh schools have no published results, so a Cardiff list is just A to Z.
+  const what = !inView.some((s) => m.value(s) != null) ? 'A to Z'
+    : mapState.metric === 'alevel' ? 'best A level results first' : 'best GCSE maths first';
   $('#school-count').textContent = `${inView.length} school${inView.length === 1 ? '' : 's'} in ${state.area.name} in this view, ${what}`;
   $('#school-list').innerHTML = inView
     .map((s) => {

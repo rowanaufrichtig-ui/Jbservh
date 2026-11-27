@@ -53,8 +53,10 @@ jobs:
             public/data/areas.json
             public/data/schools
             scripts/data/establishments
-          key: site-data-${{ github.run_id }}
-          restore-keys: site-data-
+          # Keyed on the committed school data, so a commit that changes it is
+          # not overwritten by an older cached copy.
+          key: site-data-${{ hashFiles('public/data/schools/index.json') }}-${{ github.run_id }}
+          restore-keys: site-data-${{ hashFiles('public/data/schools/index.json') }}-
 
       - name: Rebuild school data (Mondays, or when asked)
         if: github.event_name == 'workflow_dispatch' && inputs.rebuild_schools || github.event_name == 'schedule'
